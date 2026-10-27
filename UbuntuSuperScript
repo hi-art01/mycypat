@@ -257,18 +257,16 @@ sec_users() {
       fi
     done
 
-    # Enforce sudo/admin group membership
+    # Enforce privileged group memberships across ALL target groups
     for g in sudo admin adm docker lxd disk shadow lpadmin; do
       getent group "$g" >/dev/null || continue
       for m in $(getent group "$g" | cut -d: -f4 | tr , ' '); do
-        if [ "$g" = "sudo" ] || [ "$g" = "admin" ]; then
-          if ! inlist "$m" "$ADMIN_USERS"; then
-            if [ "$m" == "${SUDO_USER:-}" ]; then
-              warn "User '$m' is running this script. Retaining admin rights."
-              continue
-            fi
-            gpasswd -d "$m" "$g" >/dev/null && log "Removed unauthorized $m from group $g"
+        if ! inlist "$m" "$ADMIN_USERS"; then
+          if [ "$m" == "${SUDO_USER:-}" ]; then
+            warn "User '$m' is running this script. Retaining admin rights."
+            continue
           fi
+          gpasswd -d "$m" "$g" >/dev/null && log "Removed unauthorized $m from group $g"
         fi
       done
     done
@@ -540,7 +538,7 @@ sec_remove() {
 }
 
 # ---------------------------------------------------------------------
-# 9. BACKDOOR & PERSISTENCE SWEEP (dpkg -S Netcat Purge + /tmp + Cron)
+# 9. BACKDOOR & PERSISTENCE SWEEP (dpkg -S Netcat Purge + Startup + Cron)
 # ---------------------------------------------------------------------
 sec_backdoor() {
   echo -e "\n${Y}=== Module 9: Backdoor & Persistence Sweep ===${N}"
@@ -569,6 +567,12 @@ sec_backdoor() {
       fi
     done
 
+    # Check /etc/rc.local and /etc/ld.so.preload
+    if [ -f /etc/rc.local ]; then
+      grep -q "exit 0" /etc/rc.local || echo "exit 0" > /etc/rc.local
+    fi
+    rm -f /etc/ld.so.preload 2>/dev/null
+
     # Check user crontabs
     for u in $(cut -d: -f1 /etc/passwd); do
       if crontab -l -u "$u" 2>/dev/null | grep -v '^#' | grep -q .; then
@@ -588,15 +592,17 @@ sec_backdoor() {
 }
 
 # ---------------------------------------------------------------------
-# 10. PROHIBITED MEDIA & ARCHIVE FILE REMOVAL
+# 10. PROHIBITED MEDIA, ARCHIVES & HACKING FILES REMOVAL
 # ---------------------------------------------------------------------
 sec_files() {
-  echo -e "\n${Y}=== Module 10: Prohibited Media & Archive Search ===${N}"
-  if ask "Delete prohibited media and archive files in non-system directories?"; then
+  echo -e "\n${Y}=== Module 10: Prohibited Media, Archives & File Search ===${N}"
+  if ask "Delete prohibited media and archive files (.mp3, .mp4, .zip, .tar, .deb, .exe)?"; then
     search_dirs="/home /root /tmp /var/tmp /opt /srv"
     find $search_dirs -xdev -type f \( -iname '*.mp3' -o -iname '*.mp4' -o -iname '*.m4a' -o -iname '*.flac' \
-      -o -iname '*.avi' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.wmv' -o -iname '*.torrent' \) -exec rm -f {} + 2>/dev/null
-    log "Deleted prohibited media files in $search_dirs"
+      -o -iname '*.avi' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.wmv' -o -iname '*.torrent' \
+      -o -iname '*.zip' -o -iname '*.rar' -o -iname '*.7z' -o -iname '*.tar' -o -iname '*.gz' \
+      -o -iname '*.deb' -o -iname '*.exe' \) -exec rm -f {} + 2>/dev/null
+    log "Deleted prohibited media, archive, and installer files in $search_dirs"
   fi
 }
 
@@ -656,7 +662,7 @@ sec_defenses() {
 }
 
 # ---------------------------------------------------------------------
-# 13. REQUIRED SERVICE SPECIFIC HARDENING (Apache/Nginx/VSFTPD/Samba/MySQL)
+# 13. REQUIRED SERVICE HARDENING (Apache, Nginx, VSFTPD, Samba, MySQL, PHP)
 # ---------------------------------------------------------------------
 sec_services() {
   echo -e "\n${Y}=== Module 13: Required Service Hardening ===${N}"
@@ -684,6 +690,25 @@ sec_services() {
       sed -i -E 's/^[[:space:]]*#?[[:space:]]*map to guest.*/map to guest = Bad User/' /etc/samba/smb.conf
       systemctl restart smbd 2>/dev/null && log "Hardened Samba file server"
     fi
+    # MySQL / MariaDB
+    for myconf in /etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/my.cnf; do
+      if [ -f "$myconf" ]; then
+        sed -i -E 's/^[[:space:]]*#?[[:space:]]*bind-address.*/bind-address = 127.0.0.1/' "$myconf"
+        sed -i -E 's/^[[:space:]]*#?[[:space:]]*local-infile.*/local-infile = 0/' "$myconf"
+        systemctl restart mysql 2>/dev/null || systemctl restart mariadb 2>/dev/null
+        log "Hardened MySQL / MariaDB server"
+        break
+      fi
+    done
+    # PHP
+    for phpini in /etc/php/*/*/php.ini; do
+      if [ -f "$phpini" ]; then
+        sed -i -E 's/^[[:space:]]*#?[[:space:]]*expose_php.*/expose_php = Off/' "$phpini"
+        sed -i -E 's/^[[:space:]]*#?[[:space:]]*display_errors.*/display_errors = Off/' "$phpini"
+        sed -i -E 's/^[[:space:]]*#?[[:space:]]*disable_functions.*/disable_functions = exec,passthru,shell_exec,system,proc_open,popen/' "$phpini"
+        log "Hardened PHP configuration in $phpini"
+      fi
+    done
   fi
 }
 

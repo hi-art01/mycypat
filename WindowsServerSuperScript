@@ -21,6 +21,8 @@ param(
 $ErrorActionPreference = 'Continue'
 $LogFile = "C:\Windows\Temp\CP-WindowsServer-Hardening-Log.txt"
 $SummaryFile = "C:\CP-Notes\summary.txt"
+$Desktop = [Environment]::GetFolderPath('Desktop')
+$EvFile  = Join-Path $Desktop 'CP-Evidence.txt'
 
 if (-not (Test-Path "C:\CP-Notes")) { New-Item -Path "C:\CP-Notes" -ItemType Directory -Force | Out-Null }
 
@@ -68,6 +70,14 @@ function Set-RegProperty {
     } catch { Warn "Failed setting $Path\$Name : $($_.Exception.Message)" }
 }
 
+function Set-RegMultiEmpty {
+    param([string]$RegPath, [string]$Name)
+    try {
+        reg add $RegPath /v $Name /t REG_MULTI_SZ /d "" /f | Out-Null
+        Info "$RegPath\$Name = (blank)"
+    } catch { Warn "Failed MultiEmpty $RegPath\$Name" }
+}
+
 Write-Host "==========================================================" -ForegroundColor Green
 Write-Host "   CyberPatriot Windows Server SuperScript (Interactive)  " -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Green
@@ -86,20 +96,30 @@ if (-not $Force) {
 }
 
 # ---------------------------------------------------------------------
-# READ-ONLY FORENSICS & SCENARIO HELPER
+# MODULE 0: FORENSICS EVIDENCE SNAPSHOT
 # ---------------------------------------------------------------------
-Section "Forensics & Evidence Helper (Read-Only Scan)"
-Get-ChildItem -Path "$env:SystemDrive\Users\*\Desktop" -Filter "*Forensics*" -ErrorAction SilentlyContinue | ForEach-Object {
-    Info "Found Forensics File: $($_.FullName)"
-    Get-Content $_.FullName -TotalCount 20 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+Section "0. Forensics Evidence Snapshot Generation"
+
+function Add-Ev($title, $data) {
+    "`n=== $title ===" | Out-File $EvFile -Append -Encoding utf8
+    if ($null -ne $data) { ($data | Out-String -Width 250) | Out-File $EvFile -Append -Encoding utf8 }
 }
-Info "Listening TCP Connections:"
-Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    Port: $($_.LocalPort) PID: $($_.OwningProcess)" }
+
+try {
+    "CP Evidence Collected $(Get-Date) on $env:COMPUTERNAME by $env:USERNAME" | Out-File $EvFile -Force -Encoding utf8
+    Add-Ev 'OS' (Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber,InstallDate | Format-List)
+    Add-Ev 'Local users' (Get-LocalUser | Select-Object Name,Enabled,SID,LastLogon,PasswordLastSet,PasswordRequired,PasswordExpires,Description | Format-Table -AutoSize)
+    Add-Ev 'Shares' (Get-SmbShare | Select-Object Name,Path,Description | Format-Table -AutoSize)
+    Add-Ev 'Listening ports' (Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Sort-Object LocalPort | ForEach-Object { [pscustomobject]@{Port=$_.LocalPort;Addr=$_.LocalAddress;PID=$_.OwningProcess;Proc=(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).Name} } | Format-Table -AutoSize)
+    Add-Ev 'Scheduled tasks' (Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskPath -notmatch '\\Microsoft\\' } | Select-Object TaskPath,TaskName,State | Format-Table -AutoSize)
+    Add-Ev 'Installed software' (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName } | Select-Object DisplayName,DisplayVersion,Publisher | Format-Table -AutoSize)
+    Info "Complete evidence snapshot generated at: $EvFile"
+} catch { Warn "Evidence collection encountered an issue: $($_.Exception.Message)" }
 
 # ---------------------------------------------------------------------
 # STEP 0: README DETAILS & PROMPTS
 # ---------------------------------------------------------------------
-Section "0. README Details & Specifics Input"
+Section "Step 0: README Details & Specifics Input"
 
 $AuthUsersInput = if ($Users) { $Users } else { Read-Host "Enter ALL Authorized Domain/Local Users (comma-separated, e.g. 'alice,bob,carol')" }
 $AuthorizedUsers = @($AuthUsersInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -243,14 +263,13 @@ Section "2. Password, Lockout, and User Rights Assignment Policies"
 if (Confirm-Prompt "Apply password complexity, lockout threshold (10), and SID-based user rights assignment?") {
     net accounts /minpwlen:14 /minpwage:1 /maxpwage:90 /uniquepw:24 /lockoutthreshold:10 /lockoutduration:30 /lockoutwindow:30 | Out-Null
 
-    $rdpSID = if ($RDPRequired) { ",*S-1-5-32-555" } else { "" }
     $infPath = Join-Path $env:TEMP 'cp-secpol.inf'
     $sdb = Join-Path $env:TEMP 'cp-secpol.sdb'
-    $infContent = @"
+    $infContent = @'
 [Unicode]
 Unicode=yes
 [Version]
-signature="`$CHICAGO`"
+signature="$CHICAGO$"
 Revision=1
 [System Access]
 MinimumPasswordAge = 1
@@ -267,11 +286,11 @@ LSAAnonymousNameLookup = 0
 EnableGuestAccount = 0
 [Privilege Rights]
 SeTrustedCredManAccessPrivilege =
-SeNetworkLogonRight = *S-1-5-32-544$rdpSID
+SeNetworkLogonRight = *S-1-5-32-544
 SeTcbPrivilege =
 SeIncreaseQuotaPrivilege = *S-1-5-32-544,*S-1-5-19,*S-1-5-20
 SeInteractiveLogonRight = *S-1-5-32-544,*S-1-5-32-545
-SeRemoteInteractiveLogonRight = *S-1-5-32-544$rdpSID
+SeRemoteInteractiveLogonRight = *S-1-5-32-544
 SeBackupPrivilege = *S-1-5-32-544
 SeSystemTimePrivilege = *S-1-5-32-544,*S-1-5-19
 SeTimeZonePrivilege = *S-1-5-32-544,*S-1-5-19
@@ -292,14 +311,20 @@ SeLoadDriverPrivilege = *S-1-5-32-544
 SeSecurityPrivilege = *S-1-5-32-544
 SeShutdownPrivilege = *S-1-5-32-544,*S-1-5-32-545
 SeTakeOwnershipPrivilege = *S-1-5-32-544
-"@
+'@
+
+    if ($RDPRequired) {
+        $infContent = $infContent -replace 'SeNetworkLogonRight = \*S-1-5-32-544', 'SeNetworkLogonRight = *S-1-5-32-544,*S-1-5-32-555'
+        $infContent = $infContent -replace 'SeRemoteInteractiveLogonRight = \*S-1-5-32-544', 'SeRemoteInteractiveLogonRight = *S-1-5-32-544,*S-1-5-32-555'
+    }
+
     $infContent | Out-File -FilePath $infPath -Encoding unicode -Force
     secedit /configure /db $sdb /cfg $infPath /areas SECURITYPOLICY USER_RIGHTS /quiet | Out-Null
     Info "Secedit local security policy and user rights assignments applied"
 }
 
 # ---------------------------------------------------------------------
-# 3. AUDIT POLICY & SECURITY REGISTRY OPTIONS
+# 3. AUDIT POLICY & ALL SECURITY REGISTRY OPTIONS (40+)
 # ---------------------------------------------------------------------
 Section "3. Audit Policy & Security Registry Options"
 
@@ -313,6 +338,9 @@ if (Confirm-Prompt "Apply Windows Server Security Options, LSA, CAD & LDAP Harde
     $lsa = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
     $sys = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
     $lsv = 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters'
+    $lws = 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters'
+    $nl  = 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters'
+    $wl  = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
 
     Set-RegProperty $lsa 'LimitBlankPasswordUse' 1
     Set-RegProperty $lsa 'restrictanonymous' 1
@@ -320,7 +348,16 @@ if (Confirm-Prompt "Apply Windows Server Security Options, LSA, CAD & LDAP Harde
     Set-RegProperty $lsa 'everyoneincludesanonymous' 0
     Set-RegProperty $lsa 'NoLMHash' 1
     Set-RegProperty $lsa 'LmCompatibilityLevel' 5
+    Set-RegProperty $lsa 'disabledomaincreds' 1
+    Set-RegProperty $lsa 'forceguest' 0
     Set-RegProperty $lsa 'RunAsPPL' 1
+    Set-RegProperty $lsa 'AuditBaseObjects' 0
+    Set-RegProperty $lsa 'CrashOnAuditFail' 0
+    Set-RegProperty $lsa 'UseMachineId' 1
+    Set-RegProperty "$lsa\MSV1_0" 'allownullsessionfallback' 0
+    Set-RegProperty "$lsa\MSV1_0" 'NTLMMinClientSec' 537395200
+    Set-RegProperty "$lsa\MSV1_0" 'NTLMMinServerSec' 537395200
+    Set-RegProperty "$lsa\pku2u" 'AllowOnlineID' 0
 
     # UAC max & CAD
     Set-RegProperty $sys 'EnableLUA' 1
@@ -328,11 +365,21 @@ if (Confirm-Prompt "Apply Windows Server Security Options, LSA, CAD & LDAP Harde
     Set-RegProperty $sys 'ConsentPromptBehaviorUser' 0
     Set-RegProperty $sys 'PromptOnSecureDesktop' 1
     Set-RegProperty $sys 'DontDisplayLastUserName' 1
+    Set-RegProperty $sys 'DontDisplayLockedUserId' 3
     Set-RegProperty $sys 'DisableCAD' 0
     Set-RegProperty $sys 'InactivityTimeoutSecs' 900
+    Set-RegProperty $sys 'UndockWithoutLogon' 0
+    Set-RegProperty $sys 'FilterAdministratorToken' 1
+    Set-RegProperty $sys 'EnableUIADesktopToggle' 0
+    Set-RegProperty $sys 'EnableInstallerDetection' 1
+    Set-RegProperty $sys 'ValidateAdminCodeSignatures' 0
+    Set-RegProperty $sys 'EnableSecureUIAPaths' 1
+    Set-RegProperty $sys 'EnableVirtualization' 1
 
     # AutoRun & SmartScreen
     Set-RegProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer' 'NoDriveTypeAutoRun' 255
+    Set-RegProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer' 'NoAutorun' 1
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' 'NoAutoplayfornonVolume' 1
     Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'EnableSmartScreen' 1
 
     # SMB Hardening
@@ -340,6 +387,28 @@ if (Confirm-Prompt "Apply Windows Server Security Options, LSA, CAD & LDAP Harde
     Set-RegProperty $lsv 'RequireSecuritySignature' 1
     Set-RegProperty $lsv 'EnableSecuritySignature' 1
     Set-RegProperty $lsv 'DisableCompression' 1
+    Set-RegProperty $lsv 'SmbServerNameHardeningLevel' 1
+    Set-RegProperty $lsv 'RestrictNullSessAccess' 1
+    Set-RegMultiEmpty 'HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters' 'NullSessionPipes'
+    Set-RegMultiEmpty 'HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters' 'NullSessionShares'
+
+    Set-RegProperty $lws 'RequireSecuritySignature' 1
+    Set-RegProperty $lws 'EnableSecuritySignature' 1
+    Set-RegProperty $lws 'EnablePlainTextPassword' 0
+    Set-RegProperty $lws 'AllowInsecureGuestAuth' 0
+
+    # WDigest & Remote Assistance
+    Set-RegProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest' 'UseLogonCredential' 0
+    Set-RegProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' 'fAllowToGetHelp' 0
+
+    # UPnP & NetBIOS / LLMNR
+    Set-RegProperty 'HKLM:\SOFTWARE\Microsoft\DirectplayNATHelp\DPNHUPnP' 'UPnPMode' 2
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' 'EnableMulticast' 0
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' 'EnableMDNS' 0
+
+    # PowerShell Logging
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging' 'EnableScriptBlockLogging' 1
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging' 'EnableModuleLogging' 1
 
     if ($IsDomainController) {
         Set-RegProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters' 'LDAPServerIntegrity' 2
@@ -387,9 +456,21 @@ if (Confirm-Prompt "Enable Windows Defender Real-Time Protection and Firewall on
 }
 
 # ---------------------------------------------------------------------
-# 6. PERSISTENCE SWEEP (IFEO, WMI, Tasks, Run Keys, Hosts File, NetBIOS)
+# 6. NETWORK ADAPTER BINDINGS HARDENING
 # ---------------------------------------------------------------------
-Section "6. Persistence Sweep (IFEO, WMI, Scheduled Tasks, Run Keys, Hosts)"
+Section "6. Network Adapter Bindings Hardening"
+
+if (Confirm-Prompt "Disable insecure network adapter component bindings?") {
+    foreach ($comp in 'ms_msclient','ms_server','ms_pacer','ms_implat','ms_lltdio','ms_rspndr','ms_tcpip6') {
+        Disable-NetAdapterBinding -Name '*' -ComponentID $comp -ErrorAction SilentlyContinue
+    }
+    Info "Disabled insecure network adapter component bindings"
+}
+
+# ---------------------------------------------------------------------
+# 7. PERSISTENCE SWEEP (IFEO, WMI, Tasks, Run Keys, Hosts File, NetBIOS)
+# ---------------------------------------------------------------------
+Section "7. Persistence Sweep (IFEO, WMI, Scheduled Tasks, Run Keys, Hosts)"
 
 if (Confirm-Prompt "Sweep IFEO debugger hijacks, WMI subscriptions, Scheduled Tasks, Run keys, and Hosts file?") {
     # IFEO Debugger Hijacks
@@ -413,8 +494,8 @@ if (Confirm-Prompt "Sweep IFEO debugger hijacks, WMI subscriptions, Scheduled Ta
         }
     }
 
-    # Non-Microsoft Scheduled Tasks
-    Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskPath -notmatch '\\Microsoft\\' } | ForEach-Object {
+    # Non-Microsoft Scheduled Tasks (Preserving CyberPatriot CCS Engine tasks)
+    Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskPath -notmatch '\\Microsoft\\' -and $_.TaskName -notmatch 'CCS|CyberPatriot|Engine' -and $_.TaskPath -notmatch 'CCS|CyberPatriot' } | ForEach-Object {
         if ($script:FAST_MODE -or (Confirm-Timed "Unregister non-Microsoft Scheduled Task '$($_.TaskName)'?")) {
             Unregister-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath -Confirm:$false -ErrorAction SilentlyContinue
             Info "Unregistered task $($_.TaskName)"
@@ -450,9 +531,9 @@ if (Confirm-Prompt "Sweep IFEO debugger hijacks, WMI subscriptions, Scheduled Ta
 }
 
 # ---------------------------------------------------------------------
-# 7. SERVER ROLES HARDENING (DNS, DHCP, IIS) & FEATURES
+# 8. SERVER ROLES HARDENING (DNS, DHCP, IIS) & FEATURES
 # ---------------------------------------------------------------------
-Section "7. Server Roles, Features & Services Hardening"
+Section "8. Server Roles, Features & Services Hardening"
 
 if (Get-Command Get-DnsServerZone -ErrorAction SilentlyContinue) {
     if (Confirm-Prompt "Harden DNS Server (disable zone transfers to arbitrary servers)?") {
@@ -497,9 +578,9 @@ if (Confirm-Prompt "Disable unauthorized services and server features?") {
 }
 
 # ---------------------------------------------------------------------
-# 8. SERVER SHARES & PROHIBITED MEDIA CLEANUP
+# 9. SERVER SHARES, BACKDOORS & MEDIA/ARCHIVE CLEANUP
 # ---------------------------------------------------------------------
-Section "8. Server Shares, Backdoors & Media Cleanup"
+Section "9. Server Shares, Backdoors & Media/Archive Cleanup"
 
 if (Confirm-Prompt "Prune non-standard SMB shares?") {
     $okShares = @('ADMIN$','C$','IPC$')
@@ -516,7 +597,7 @@ if (Confirm-Prompt "Prune non-standard SMB shares?") {
     }
 }
 
-if (Confirm-Prompt "Kill backdoor processes, delete netcat binaries, and prune MP3/media files?") {
+if (Confirm-Prompt "Kill backdoor processes, delete netcat binaries, and prune media/archives?") {
     $badProcs = @('GooseDesktop','nc','ncat','netcat')
     foreach ($p in Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -in $badProcs }) {
         Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
@@ -530,16 +611,16 @@ if (Confirm-Prompt "Kill backdoor processes, delete netcat binaries, and prune M
         Info "Deleted netcat binary $($f.FullName)"
     }
 
-    Get-ChildItem -Path "$env:SystemDrive\Users" -Recurse -Force -Include '*.mp3','*.mp4','*.avi','*.mkv','*.flac','*.wav','*.mov','*.wmv' -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-ChildItem -Path "$env:SystemDrive\Users\*" -Recurse -Force -Include '*.mp3','*.mp4','*.avi','*.mkv','*.flac','*.wav','*.mov','*.wmv','*.zip','*.rar','*.7z','*.tar','*.gz','*.deb','*.exe','*.msi','*.torrent' -ErrorAction SilentlyContinue | ForEach-Object {
         Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
-        Info "Deleted media file: $($_.FullName)"
+        Info "Deleted media/archive file: $($_.FullName)"
     }
 }
 
 # ---------------------------------------------------------------------
-# 9. AUTOMATIC HEALTH CHECK
+# 10. AUTOMATIC HEALTH CHECK
 # ---------------------------------------------------------------------
-Section "9. Automatic Health Check"
+Section "10. Automatic Health Check"
 
 function Check-Health($name, $condition) {
     if ($condition) { Write-Host "  [ PASS ] $name" -ForegroundColor Green; Info "HEALTH PASS: $name" }
@@ -554,9 +635,9 @@ if ($RDPRequired) {
 }
 
 # ---------------------------------------------------------------------
-# 10. FINAL VERIFICATION REPORT
+# 11. FINAL VERIFICATION REPORT
 # ---------------------------------------------------------------------
-Section "10. Final Verification Report"
+Section "11. Final Verification Report"
 
 Write-Host "Active SMB Shares    : $((Get-SmbShare -ErrorAction SilentlyContinue).Name -join ', ')"
 Write-Host "Firewall Profiles    : Domain=$(Get-NetFirewallProfile -Profile Domain).Enabled, Public=$(Get-NetFirewallProfile -Profile Public).Enabled, Private=$(Get-NetFirewallProfile -Profile Private).Enabled"
