@@ -84,7 +84,7 @@ if ($IsDomainController -and (Get-Module -ListAvailable ActiveDirectory)) {
         foreach ($u in Get-ADUser -Filter *) {
             $sam = $u.SamAccountName
             if ($sam -in $builtin -or $sam -eq $current) { continue }
-            if ($sam -notin $AuthorizedUsers) {
+            if ($sam -notin $AuthorizedUsers -and $sam -notin $AuthorizedAdmins) {
                 if (Confirm-Prompt "Remove unauthorized AD User '$sam'?") {
                     Remove-ADUser -Identity $u -Confirm:$false
                     Info "Removed AD User $sam"
@@ -105,16 +105,39 @@ if ($IsDomainController -and (Get-Module -ListAvailable ActiveDirectory)) {
             }
         }
     }
+
+    if (Confirm-Prompt "Reset password for all authorized AD domain accounts to '$NewPassword'?") {
+        foreach ($u in Get-ADUser -Filter * | Where-Object { $_.Enabled }) {
+            $sam = $u.SamAccountName
+            if ($sam -eq $current -or $sam -in $builtin) { continue }
+            if ($sam -in $AuthorizedUsers -or $sam -in $AuthorizedAdmins) {
+                Set-ADAccountPassword -Identity $u -Reset -NewPassword $sec
+                Set-ADUser -Identity $u -PasswordNeverExpires $false
+                Info "Updated password and expiration for AD account $sam"
+            }
+        }
+    }
 } else {
     # Non-DC Server
     if (Confirm-Prompt "Audit and remove unauthorized local users?") {
         foreach ($u in Get-LocalUser) {
             if ($u.Name -in $builtin -or $u.Name -eq $current) { continue }
-            if ($u.Name -notin $AuthorizedUsers) {
+            if ($u.Name -notin $AuthorizedUsers -and $u.Name -notin $AuthorizedAdmins) {
                 if (Confirm-Prompt "Remove UNAUTHORIZED user '$($u.Name)'?") {
                     Remove-LocalUser -Name $u.Name
                     Info "Removed user $($u.Name)"
                 }
+            }
+        }
+    }
+
+    if (Confirm-Prompt "Reset password for all authorized local accounts to '$NewPassword'?") {
+        foreach ($u in Get-LocalUser | Where-Object { $_.Enabled }) {
+            if ($u.Name -eq $current -or $u.Name -in $builtin) { continue }
+            if ($u.Name -in $AuthorizedUsers -or $u.Name -in $AuthorizedAdmins) {
+                Set-LocalUser -Name $u.Name -Password $sec -PasswordNeverExpires $false
+                net user $u.Name /passwordreq:yes | Out-Null
+                Info "Updated password and expiration for $($u.Name)"
             }
         }
     }
@@ -159,9 +182,33 @@ if (Confirm-Prompt "Apply Windows Server Security Options & LSA/SMB Hardening?")
 }
 
 # ---------------------------------------------------------------------
-# 3. DEFENDER & FIREWALL
+# 3. REMOTE DESKTOP (RDP) HARDENING
 # ---------------------------------------------------------------------
-Section "3. Windows Defender & Firewall"
+Section "3. Remote Desktop (RDP) Hardening"
+
+$ts  = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
+$rdp = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
+
+if ($RDPRequired) {
+    if (Confirm-Prompt "Configure required Remote Desktop (Enable RDP, NLA, SSL, and Firewall rules)?") {
+        Set-RegProperty $ts 'fDenyTSConnections' 0
+        Set-RegProperty $rdp 'UserAuthentication' 1
+        Set-RegProperty $rdp 'SecurityLayer' 2
+        Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
+        Info "Remote Desktop enabled with NLA, SSL security, and firewall rules"
+    }
+} else {
+    if (Confirm-Prompt "Disable Remote Desktop (RDP)?") {
+        Set-RegProperty $ts 'fDenyTSConnections' 1
+        Disable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
+        Info "Remote Desktop disabled"
+    }
+}
+
+# ---------------------------------------------------------------------
+# 4. DEFENDER & FIREWALL
+# ---------------------------------------------------------------------
+Section "4. Windows Defender & Firewall"
 
 if (Confirm-Prompt "Enable Defender Real-Time Monitoring and Firewall on all profiles?") {
     Set-MpPreference -DisableRealtimeMonitoring $false -DisableBehaviorMonitoring $false -PUAProtection Enabled -ErrorAction SilentlyContinue
@@ -170,9 +217,9 @@ if (Confirm-Prompt "Enable Defender Real-Time Monitoring and Firewall on all pro
 }
 
 # ---------------------------------------------------------------------
-# 4. SERVER ROLES HARDENING (DNS, DHCP, IIS)
+# 5. SERVER ROLES HARDENING (DNS, DHCP, IIS)
 # ---------------------------------------------------------------------
-Section "4. Server Roles & Web Hardening"
+Section "5. Server Roles & Web Hardening"
 
 if (Get-Command Get-DnsServerZone -ErrorAction SilentlyContinue) {
     if (Confirm-Prompt "Harden DNS Server (disable zone transfers to arbitrary servers)?") {
@@ -199,12 +246,15 @@ if (Confirm-Prompt "Disable SMBv1 Server protocol?") {
 }
 
 # ---------------------------------------------------------------------
-# 5. SERVER SPECIFIC CLEANUP (Disable custom C$ shares)
+# 6. SERVER SHARES & MEDIA CLEANUP
 # ---------------------------------------------------------------------
-Section "5. Server Shares & Media Cleanup"
+Section "6. Server Shares & Media Cleanup"
 
-if (Confirm-Prompt "Remove non-standard SMB shares (except ADMIN$, C$, IPC$) and WebCompanion?") {
+if (Confirm-Prompt "Remove non-standard SMB shares?") {
     $okShares = @('ADMIN$','C$','IPC$')
+    if ($IsDomainController) {
+        $okShares += @('SYSVOL','NETLOGON')
+    }
     foreach ($sh in Get-SmbShare -ErrorAction SilentlyContinue) {
         if ($sh.Name -notin $okShares) {
             if (Confirm-Prompt "Remove SMB Share '$($sh.Name)'?") {

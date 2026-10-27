@@ -69,7 +69,7 @@ $sec = ConvertTo-SecureString $NewPassword -AsPlainText -Force
 if (Confirm-Prompt "Audit and remove unauthorized local users?") {
     foreach ($u in Get-LocalUser) {
         if ($u.Name -in $builtin -or $u.Name -eq $current) { continue }
-        if ($u.Name -notin $AuthorizedUsers) {
+        if ($u.Name -notin $AuthorizedUsers -and $u.Name -notin $AuthorizedAdmins) {
             if (Confirm-Prompt "Remove UNAUTHORIZED user '$($u.Name)'?") {
                 Remove-LocalUser -Name $u.Name
                 Info "Removed user $($u.Name)"
@@ -104,7 +104,7 @@ if (Confirm-Prompt "Enforce Administrators group membership?") {
 if (Confirm-Prompt "Reset password for all authorized local accounts to '$NewPassword'?") {
     foreach ($u in Get-LocalUser | Where-Object { $_.Enabled }) {
         if ($u.Name -eq $current -or $u.Name -in $builtin) { continue }
-        if ($u.Name -in $AuthorizedUsers) {
+        if ($u.Name -in $AuthorizedUsers -or $u.Name -in $AuthorizedAdmins) {
             Set-LocalUser -Name $u.Name -Password $sec -PasswordNeverExpires $false
             net user $u.Name /passwordreq:yes | Out-Null
             Info "Updated password and expiration for $($u.Name)"
@@ -192,9 +192,33 @@ if (Confirm-Prompt "Apply security registry options (UAC max, SmartScreen, LSA, 
 }
 
 # ---------------------------------------------------------------------
-# 4. WINDOWS DEFENDER & FIREWALL
+# 4. REMOTE DESKTOP (RDP) HARDENING
 # ---------------------------------------------------------------------
-Section "4. Windows Defender & Firewall Settings"
+Section "4. Remote Desktop (RDP) Hardening"
+
+$ts  = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
+$rdp = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
+
+if ($RDPRequired) {
+    if (Confirm-Prompt "Configure required Remote Desktop (Enable RDP, NLA, SSL, and Firewall rules)?") {
+        Set-RegProperty $ts 'fDenyTSConnections' 0
+        Set-RegProperty $rdp 'UserAuthentication' 1
+        Set-RegProperty $rdp 'SecurityLayer' 2
+        Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
+        Info "Remote Desktop enabled with NLA, SSL security, and firewall rules"
+    }
+} else {
+    if (Confirm-Prompt "Disable Remote Desktop (RDP)?") {
+        Set-RegProperty $ts 'fDenyTSConnections' 1
+        Disable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
+        Info "Remote Desktop disabled"
+    }
+}
+
+# ---------------------------------------------------------------------
+# 5. WINDOWS DEFENDER & FIREWALL
+# ---------------------------------------------------------------------
+Section "5. Windows Defender & Firewall Settings"
 
 if (Confirm-Prompt "Enable Windows Defender Real-Time Protection and firewall?") {
     Set-MpPreference -DisableRealtimeMonitoring $false -DisableBehaviorMonitoring $false -DisableIOAVProtection $false -PUAProtection Enabled -ErrorAction SilentlyContinue
@@ -208,9 +232,9 @@ if (Confirm-Prompt "Enable Windows Defender Real-Time Protection and firewall?")
 }
 
 # ---------------------------------------------------------------------
-# 5. SERVICES & FEATURES
+# 6. SERVICES & FEATURES
 # ---------------------------------------------------------------------
-Section "5. Services & Optional Features"
+Section "6. Services & Optional Features"
 
 if (Confirm-Prompt "Disable unauthorized services (Telnet, FTP, IIS, SNMP, UPnP)?") {
     $svcDisable = @('FTPSVC','MSFTPSVC','W3SVC','WMSvc','TlntSvr','SNMP','SNMPTRAP','RIPListener','upnphost','SSDPSRV','RemoteRegistry','NfsClnt')
@@ -234,9 +258,9 @@ if (Confirm-Prompt "Disable SMBv1 protocol?") {
 }
 
 # ---------------------------------------------------------------------
-# 6. PROHIBITED SOFTWARE, PROCESSES & MEDIA FILES
+# 7. PROHIBITED SOFTWARE, PROCESSES & MEDIA FILES
 # ---------------------------------------------------------------------
-Section "6. Prohibited Software, Backdoors & Media Files"
+Section "7. Prohibited Software, Backdoors & Media Files"
 
 if (Confirm-Prompt "Sweep and kill netcat/backdoor processes?") {
     $badProcs = @('GooseDesktop','nc','ncat','netcat')
@@ -254,9 +278,9 @@ if (Confirm-Prompt "Scan and delete prohibited MP3 and media files under C:\User
 }
 
 # ---------------------------------------------------------------------
-# 7. AUTOMATIC UPDATES
+# 8. AUTOMATIC UPDATES
 # ---------------------------------------------------------------------
-Section "7. Windows Update Policy"
+Section "8. Windows Update Policy"
 
 if (Confirm-Prompt "Configure automatic Windows Updates?") {
     Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'NoAutoUpdate' 0
