@@ -15,6 +15,22 @@ This repository contains four specialized, interactive CyberPatriot hardening sc
 
 ---
 
+## CyberPatriot Practice Images & Training Resources
+
+Practice on virtual machines using snapshots before competing! Use these official and community resources to download CyberPatriot practice images:
+
+1. **Official US CyberPatriot Training Materials & Practice Images:**
+   - [US CyberPatriot Official Training Materials](https://www.uscyberpatriot.org/competition/training-materials)
+   - [Official Linux Training Page](https://www.uscyberpatriot.org/competition/training-materials/linux)
+   - [Official Windows Training Page](https://www.uscyberpatriot.org/competition/training-materials/windows)
+
+2. **Community Practice Images & Repositories:**
+   - [CyberPanther Practice Images Archive](https://github.com/CyberPanthers)
+   - [CyberPatriot Practice Image Catalog (CyberPatriot Wiki)](https://github-wiki-see.page/m/Wes-Bl/Cyberpatriot-Wiki/wiki)
+   - [LinuxVox CyberPatriot Guide & Exercises](https://linuxvox.com/blog/cyberpatriot-linux-checklist/)
+
+---
+
 ## How to Run in a Competition Round
 
 ### 1. Pre-Run Prerequisites (First 2 Minutes of the Round)
@@ -110,6 +126,6 @@ This repository contains four specialized, interactive CyberPatriot hardening sc
 
 ## Competition Best Practices
 
-1. **Review Log & Summary Files:** All script outputs are logged (`/var/log/cp_*_hardening.log` and `/root/cp-notes/summary.txt` on Linux; `C:\Windows\Temp\CP-*-Hardening-Log.txt` and `C:\CP-Notes\summary.txt` on Windows).
+1. **Keep Log Files:** All script outputs are logged (`/var/log/cp_*_hardening.log` and `/root/cp-notes/summary.txt` on Linux; `C:\Windows\Temp\CP-*-Hardening-Log.txt` and `C:\CP-Notes\summary.txt` on Windows).
 2. **Never Blindly Disable Required Services:** Always include required services in `KEEP_SERVICES` during Step 0 prompts.
 3. **Check Scoring Engine:** After running the script, check the CyberPatriot Scoring Report to verify points gained.
