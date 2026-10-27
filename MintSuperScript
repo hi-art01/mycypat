@@ -60,17 +60,62 @@ ask_timed() {
 
 inlist() { [[ " $2 " == *" $1 "* ]]; }
 
-set_conf() {
+# Format-aware config helper: set_kv for flat key-value files
+set_kv() {
   local key="$1" val="$2" file="$3" sep="${4:-=}"
   touch "$file"
-  sed -i -E "/^[[:space:]]*#?[[:space:]]*${key//\//\\/}[[:space:]]*${sep}/d" "$file"
-  echo "${key}${sep}${val}" >> "$file"
+  local key_regex
+  key_regex=$(printf '%s' "$key" | sed 's/[.[\*^$()+?{|]/\\&/g')
+  if grep -qE "^[[:space:]]*#?[[:space:]]*${key_regex}([[:space:]]*${sep}|$)" "$file"; then
+    # Replace first occurrence
+    sed -i -E "0,/^[[:space:]]*#?[[:space:]]*${key_regex}([[:space:]]*${sep}|$)/s//${key}${sep}${val}/" "$file"
+    # Delete any subsequent duplicate lines
+    sed -i -E "2,\${/^[[:space:]]*#?[[:space:]]*${key_regex}([[:space:]]*${sep}|$)/d;}" "$file"
+  else
+    echo "${key}${sep}${val}" >> "$file"
+  fi
+}
+
+# Format-aware config helper: set_ini for INI sectioned files
+set_ini() {
+  local section="$1" key="$2" val="$3" file="$4"
+  touch "$file"
+  local sec_regex="\[${section}\]"
+  local key_regex
+  key_regex=$(printf '%s' "$key" | sed 's/[.[\*^$()+?{|]/\\&/g')
+
+  if grep -qE "^[[:space:]]*${sec_regex}" "$file"; then
+    # Section exists. Check if key exists under this section.
+    if awk -v sec="[$section]" -v k="$key" '
+      BEGIN { found=0; in_sec=0 }
+      $0 ~ "^\\[" { if ($0 ~ "^"sec) in_sec=1; else in_sec=0 }
+      in_sec && $0 ~ "^[[:space:]]*#?[[:space:]]*"k"[[:space:]]*=" { found=1 }
+      END { exit !found }
+    ' "$file"; then
+      # Key exists in section. Replace inside section.
+      awk -v sec="[$section]" -v k="$key" -v v="$val" '
+        BEGIN { in_sec=0; done=0 }
+        $0 ~ "^\\[" { if ($0 ~ "^"sec) in_sec=1; else in_sec=0 }
+        in_sec && !done && $0 ~ "^[[:space:]]*#?[[:space:]]*"k"[[:space:]]*=" {
+          print k " = " v; done=1; next
+        }
+        { print }
+      ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+    else
+      # Section exists but key doesn't. Insert right after section header.
+      sed -i -E "/^[[:space:]]*${sec_regex}/a ${key} = ${val}" "$file"
+    fi
+  else
+    # Section missing. Append new section and key.
+    echo -e "\n[${section}]\n${key} = ${val}" >> "$file"
+  fi
 }
 
 # ---------------------------------------------------------------------
-# PARSE NON-INTERACTIVE COMMAND LINE FLAGS
+# PARSE COMMAND LINE FLAGS
 # ---------------------------------------------------------------------
 NON_INTERACTIVE="no"
+SELF_TEST="no"
 CLI_USERS=""
 CLI_ADMINS=""
 CLI_KEEP=""
@@ -80,6 +125,7 @@ CLI_PASSWORD=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -y|--yes|--non-interactive) NON_INTERACTIVE="yes"; ALL_MODULES="yes"; FAST_MODE="yes"; shift ;;
+    --self-test) SELF_TEST="yes"; shift ;;
     --users) CLI_USERS="$2"; shift 2 ;;
     --admins) CLI_ADMINS="$2"; shift 2 ;;
     --keep) CLI_KEEP="$2"; shift 2 ;;
@@ -96,7 +142,7 @@ echo -e "${G}====================================================${N}"
 # ---------------------------------------------------------------------
 # FORENSICS GATE
 # ---------------------------------------------------------------------
-if [ "$NON_INTERACTIVE" != "yes" ]; then
+if [ "$NON_INTERACTIVE" != "yes" ] && [ "$SELF_TEST" != "yes" ]; then
   echo -e "\n${R}*** FORENSICS GATE ***${N}"
   echo "Before running remediation scripts, confirm you have completed all Forensics Questions!"
   while true; do
@@ -120,7 +166,7 @@ echo "Active Listening Network Services:"
 ss -tulpn 2>/dev/null | grep LISTEN | sed 's/^/    /'
 
 # ---------------------------------------------------------------------
-# STEP 0: README SPECIFICS & CONFIGURATION PROMPTS
+# STEP 0: README DETAILS & SPECIFICS INPUT
 # ---------------------------------------------------------------------
 echo -e "\n${Y}=== Step 0: README Details & Specifics Input ===${N}"
 
@@ -130,7 +176,7 @@ get_input() {
   local default_val="$3"
   local val=""
   if [ -n "${!var_name}" ]; then return; fi
-  if [ "$NON_INTERACTIVE" = "yes" ]; then
+  if [ "$NON_INTERACTIVE" = "yes" ] || [ "$SELF_TEST" = "yes" ]; then
     printf -v "$var_name" '%s' "$default_val"
     return
   fi
@@ -156,7 +202,7 @@ get_input "Enter Required Services/Packages to KEEP (space-separated, e.g. 'apac
 get_input "Enter Additional Firewall Ports to ALLOW (space-separated, e.g. '80/tcp 443/tcp 22/tcp')" UFW_ALLOW "22/tcp"
 get_input "Enter Default Password for Authorized Accounts (will not be logged)" NEW_PASSWORD "Cyb3r-Pat!2026-xQz"
 
-if [ "$NON_INTERACTIVE" != "yes" ]; then
+if [ "$NON_INTERACTIVE" != "yes" ] && [ "$SELF_TEST" != "yes" ]; then
   ask "Is SSH explicitly required on this system?" "Y" && SSH_REQUIRED="yes" || SSH_REQUIRED="no"
   ask "Is Apache web server required?" "N" && REQ_APACHE="yes" || REQ_APACHE="no"
   ask "Is Nginx web server required?" "N" && REQ_NGINX="yes" || REQ_NGINX="no"
@@ -167,6 +213,7 @@ if [ "$NON_INTERACTIVE" != "yes" ]; then
 
   read -rp "Enter any Users or Groups to CREATE if missing (e.g., 'user1:group1 user2'): " CREATE_ITEMS </dev/tty
   read -rp "Enter PROHIBITED Software/Packages from README (space-separated, e.g., 'nmap wireshark'): " EXTRA_PROHIBITED </dev/tty
+  read -rp "Enter REQUIRED Software/Packages from README to preserve: " REQUIRED_SOFTWARE </dev/tty
 
   read -rp "Enter Password Policy Overrides (MinLength MaxDays MinDays WarnDays or press Enter for defaults 10 90 7 14): " PW_OVERRIDES </dev/tty
   if [ -n "$PW_OVERRIDES" ]; then
@@ -188,31 +235,22 @@ else
   ALL_MODULES="yes"
   MIN_LEN=10; MAX_DAYS=90; MIN_DAYS=7; WARN_DAYS=14
   REQ_APACHE="no"; REQ_NGINX="no"; REQ_FTP="no"; REQ_SAMBA="no"; REQ_MYSQL="no"; REQ_PHP="no"
+  REQUIRED_SOFTWARE=""
+  CREATE_ITEMS=""
 fi
 
-# Honor required roles in KEEP_SERVICES
-[ "$REQ_APACHE" = "yes" ] && KEEP_SERVICES="$KEEP_SERVICES apache2"
-[ "$REQ_NGINX" = "yes" ] && KEEP_SERVICES="$KEEP_SERVICES nginx"
-[ "$REQ_FTP" = "yes" ] && KEEP_SERVICES="$KEEP_SERVICES vsftpd proftpd"
-[ "$REQ_SAMBA" = "yes" ] && KEEP_SERVICES="$KEEP_SERVICES samba smbd"
-[ "$REQ_MYSQL" = "yes" ] && KEEP_SERVICES="$KEEP_SERVICES mysql mariadb"
-
-# Process CREATE_ITEMS and add to AUTHORIZED_USERS / ADMIN_USERS before user deletion
-for item in $CREATE_ITEMS; do
-  if [[ "$item" == *":"* ]]; then
-    u="${item%%:*}"; g="${item##*:}"
-    getent group "$g" >/dev/null || { groupadd "$g" && log "Created group $g"; }
-    id "$u" &>/dev/null || { useradd -m -s /bin/bash "$u" && log "Created user $u"; }
-    usermod -aG "$g" "$u" && log "Added $u to group $g"
-    AUTHORIZED_USERS="$AUTHORIZED_USERS $u"
-    if [ "$g" = "sudo" ] || [ "$g" = "admin" ]; then
-      ADMIN_USERS="$ADMIN_USERS $u"
-    fi
-  else
-    id "$item" &>/dev/null || { useradd -m -s /bin/bash "$item" && log "Created user $item"; }
-    AUTHORIZED_USERS="$AUTHORIZED_USERS $item"
-  fi
-done
+# Build Kept Family Map
+KEPT_FAMILIES=""
+[ "$REQ_APACHE" = "yes" ] && KEPT_FAMILIES="$KEPT_FAMILIES apache2* libapache2-mod-*"
+[ "$REQ_NGINX" = "yes" ] && KEPT_FAMILIES="$KEPT_FAMILIES nginx*"
+if [ "$REQ_PHP" = "yes" ]; then
+  KEPT_FAMILIES="$KEPT_FAMILIES php*"
+  [ "$REQ_APACHE" = "yes" ] && KEPT_FAMILIES="$KEPT_FAMILIES libapache2-mod-php*"
+  [ "$REQ_NGINX" = "yes" ] && KEPT_FAMILIES="$KEPT_FAMILIES php*-fpm"
+fi
+[ "$REQ_FTP" = "yes" ] && KEPT_FAMILIES="$KEPT_FAMILIES vsftpd proftpd* pure-ftpd* ftpd tftpd-hpa"
+[ "$REQ_SAMBA" = "yes" ] && KEPT_FAMILIES="$KEPT_FAMILIES samba* smbd smbclient libsmbclient* cifs-utils winbind"
+[ "$REQ_MYSQL" = "yes" ] && KEPT_FAMILIES="$KEPT_FAMILIES mysql-* mariadb-* libmysqlclient* libmariadb* default-mysql-*"
 
 # Display Summary Screen
 echo -e "\n${G}====================================================${N}"
@@ -220,14 +258,14 @@ echo -e "${G}               STEP 0 SUMMARY REVIEW                ${N}"
 echo -e "${G}====================================================${N}"
 echo "Authorized Users     : $AUTHORIZED_USERS"
 echo "Authorized Admins    : $ADMIN_USERS"
-echo "Keep Services        : $KEEP_SERVICES"
+echo "Kept Package Families: $KEPT_FAMILIES $KEEP_SERVICES $REQUIRED_SOFTWARE"
 echo "Allowed Firewall Ports: $UFW_ALLOW"
 echo "SSH Required         : $SSH_REQUIRED"
 echo "Password Policy      : MinLen=$MIN_LEN MaxDays=$MAX_DAYS MinDays=$MIN_DAYS WarnDays=$WARN_DAYS"
 echo "Run Mode             : FAST_MODE=$FAST_MODE | ALL_MODULES=$ALL_MODULES"
 echo -e "${G}====================================================${N}"
 
-if [ "$NON_INTERACTIVE" != "yes" ]; then
+if [ "$NON_INTERACTIVE" != "yes" ] && [ "$SELF_TEST" != "yes" ]; then
   read -rp "Proceed with hardening using these parameters? [Y/n]: " proc_in </dev/tty
   if [[ ! "${proc_in:-Y}" =~ ^[Yy] ]]; then
     echo "Aborted by user."
@@ -243,11 +281,85 @@ ettercap-text-only fcrackzip sqlmap netcat netcat-traditional netcat-openbsd nca
 BAD_SERVICE_PKGS="apache2* lighttpd nginx* php* mysql-server* mysql-client* mariadb-server* mariadb-client* postgresql* mongodb* vsftpd proftpd* pure-ftpd* tftpd-hpa ftpd samba samba-common* smbd nfs-kernel-server nfs-common rpcbind postfix exim4* sendmail* dovecot* bind9* isc-dhcp-server slapd squid xinetd openbsd-inetd telnetd inetutils-telnetd rsh-server rsh-client talk talkd snmpd cups* avahi-daemon bluez"
 
 # ---------------------------------------------------------------------
-# 1. USER & GROUP ACCOUNTS HARDENING
+# SELF-TEST FLAG IMPLEMENTATION
+# ---------------------------------------------------------------------
+if [ "$SELF_TEST" = "yes" ]; then
+  echo -e "\n${G}=== RUNNING SCRIPT SELF-TEST (NO CHANGES MADE) ===${N}"
+  echo "1. Parsed Kept Family Map:"
+  echo "   $KEPT_FAMILIES $KEEP_SERVICES $REQUIRED_SOFTWARE"
+  echo -e "\n2. Evaluating Package Purge Candidates:"
+
+  is_kept_pkg() {
+    local p="$1"
+    for kf in $KEPT_FAMILIES $KEEP_SERVICES $REQUIRED_SOFTWARE; do
+      # shellcheck disable=SC2053
+      if [[ "$p" == $kf ]]; then return 0; fi
+    done
+    return 1
+  }
+
+  for candidate_pattern in $BAD_SERVICE_PKGS $PROHIBITED_PKGS; do
+    dpkg-query -W -f='${Package}\n' "$candidate_pattern" 2>/dev/null | while read -r inst_p; do
+      if [ -n "$inst_p" ]; then
+        if is_kept_pkg "$inst_p"; then
+          echo "   [SKIP KEPT] $inst_p matches kept family/services"
+        else
+          sim_out=$(apt-get -s purge "$inst_p" 2>/dev/null)
+          removed_deps=$(echo "$sim_out" | grep -E "^Remv " | awk '{print $2}')
+          blocked="no"
+          for dep in $removed_deps; do
+            if is_kept_pkg "$dep" || [[ "$dep" =~ ^(ssh|openssh|ufw|sudo|apparmor|auditd|libpam-|network-manager|ubuntu-desktop|ubuntu-minimal|linuxmint|mint-meta-|cinnamon|lightdm|gdm3|systemd) ]]; then
+              echo "   [SKIP GUARD] $inst_p (Purge would remove protected dependency $dep)"
+              blocked="yes"
+              break
+            fi
+          done
+          if [ "$blocked" = "no" ]; then
+            echo "   [WILL PURGE] $inst_p"
+          fi
+        fi
+      fi
+    done
+  done
+
+  echo -e "\n3. Target Configuration Files to be Hardened:"
+  echo "   - /etc/login.defs, /etc/security/pwquality.conf, /etc/pam.d/su"
+  echo "   - /etc/sudoers, /etc/sudoers.d/*"
+  echo "   - /etc/sysctl.d/99-cp-hardening.conf"
+  echo "   - /etc/ssh/sshd_config, /etc/ssh/sshd_config.d/*"
+  echo "   - /etc/apt/sources.list, /etc/apt/sources.list.d/*"
+  echo "   - /etc/hosts, /etc/resolv.conf, /etc/systemd/resolved.conf"
+  echo "   - /boot/grub/grub.cfg"
+  echo -e "\nSelf-test complete. Exiting without making modifications."
+  exit 0
+fi
+
+# ---------------------------------------------------------------------
+# 1. USER & GROUP ACCOUNTS HARDENING & CREATE_ITEMS
 # ---------------------------------------------------------------------
 sec_users() {
   echo -e "\n${Y}=== Module 1: User Accounts & Groups ===${N}"
   if ask "Audit and remediate user accounts and group memberships?"; then
+    # Process CREATE_ITEMS after Step 0 confirmation
+    for item in $CREATE_ITEMS; do
+      local u_name="${item%%:*}"
+      if [[ "$item" == *":"* ]]; then
+        u="${item%%:*}"; g="${item##*:}"
+        getent group "$g" >/dev/null || { groupadd "$g" && log "Created group $g"; }
+        id "$u" &>/dev/null || { useradd -m -s /bin/bash "$u" && log "Created user $u"; }
+        usermod -aG "$g" "$u" && log "Added $u to group $g"
+        AUTHORIZED_USERS="$AUTHORIZED_USERS $u"
+        if [ "$g" = "sudo" ] || [ "$g" = "admin" ]; then
+          ADMIN_USERS="$ADMIN_USERS $u"
+        fi
+      else
+        id "$item" &>/dev/null || { useradd -m -s /bin/bash "$item" && log "Created user $item"; }
+        AUTHORIZED_USERS="$AUTHORIZED_USERS $item"
+      fi
+      echo "$u_name:$NEW_PASSWORD" | chpasswd 2>/dev/null
+      chage -m "$MIN_DAYS" -M "$MAX_DAYS" -W "$WARN_DAYS" "$u_name" 2>/dev/null
+    done
+
     # Audit non-root UID 0 accounts
     awk -F: '$3==0 && $1!="root" {print $1}' /etc/passwd | while read -r u0; do
       warn "Found non-root UID 0 account: $u0!"
@@ -323,25 +435,20 @@ sec_passwords() {
       chage -m "$MIN_DAYS" -M "$MAX_DAYS" -W "$WARN_DAYS" "$u" 2>/dev/null && log "Enforced password aging for $u (min:$MIN_DAYS max:$MAX_DAYS warn:$WARN_DAYS)"
     done
 
-    echo -e "${Y}[!] A password reset was applied to your account. Use your new password for subsequent logins.${N}"
+    echo -e "${Y}[!] A password reset was applied to your account. Use your default password for subsequent logins.${N}"
   fi
 }
 
 # ---------------------------------------------------------------------
-# 3. PAM & LOGIN POLICY HARDENING
+# 3. PAM, LOGIN POLICY & SU RESTRICTION
 # ---------------------------------------------------------------------
 sec_pam() {
-  echo -e "\n${Y}=== Module 3: PAM Password Policy & Faillock Lockout ===${N}"
-  if ask "Configure PAM password complexity, history=5, minlen=$MIN_LEN, and account lockout?"; then
-    $APT install libpam-pwquality pam-wheel >/dev/null 2>&1
+  echo -e "\n${Y}=== Module 3: PAM Password Policy, Faillock & su Restriction ===${N}"
+  if ask "Configure PAM password complexity, history=5, minlen=$MIN_LEN, faillock, and su restriction?"; then
+    $APT install libpam-pwquality >/dev/null 2>&1
 
-    # Check pam_faillock / pam_tally2 support
-    has_faillock="no"
+    # Check pam_faillock support
     if [ -f /lib/security/pam_faillock.so ] || [ -f /lib/x86_64-linux-gnu/security/pam_faillock.so ]; then
-      has_faillock="yes"
-    fi
-
-    if [ "$has_faillock" = "yes" ]; then
       cat > /usr/share/pam-configs/faillock <<'EOF'
 Name: Enforce failed login attempt counter
 Default: no
@@ -363,22 +470,31 @@ Auth:
     requisite pam_faillock.so preauth silent deny=5 unlock_time=900 fail_interval=900
 EOF
       pam-auth-update --package --enable faillock faillock_notify >/dev/null 2>&1 && log "Configured pam_faillock lockout"
-    else
-      warn "pam_faillock.so not present on this distribution release. Skipping faillock enablement."
     fi
 
     # Restrict su to wheel/sudo group
     if [ -f /etc/pam.d/su ]; then
-      set_conf "auth" "required pam_wheel.so use_uid" /etc/pam.d/su " "
-      log "Restricted su execution via pam_wheel"
+      cp /etc/pam.d/su /etc/pam.d/su.cpbak
+      wheel_grp="sudo"
+      getent group sudo >/dev/null || wheel_grp="admin"
+      if ! grep -qE "pam_wheel\.so" /etc/pam.d/su; then
+        sed -i -E "/[[:space:]]*auth[[:space:]]+sufficient[[:space:]]+pam_rootok\.so/a auth required pam_wheel.so use_uid group=${wheel_grp}" /etc/pam.d/su
+      fi
+      # Validate
+      if su -c true root 2>/dev/null; then
+        log "Restricted su execution to group $wheel_grp via pam_wheel.so"
+      else
+        warn "su restriction validation failed! Rolling back /etc/pam.d/su."
+        cp /etc/pam.d/su.cpbak /etc/pam.d/su
+      fi
     fi
 
     # Update login.defs
-    set_conf "PASS_MAX_DAYS" "$MAX_DAYS" /etc/login.defs " "
-    set_conf "PASS_MIN_DAYS" "$MIN_DAYS" /etc/login.defs " "
-    set_conf "PASS_WARN_AGE" "$WARN_DAYS" /etc/login.defs " "
-    set_conf "ENCRYPT_METHOD" "SHA512" /etc/login.defs " "
-    set_conf "UMASK" "027" /etc/login.defs " "
+    set_kv "PASS_MAX_DAYS" "$MAX_DAYS" /etc/login.defs " "
+    set_kv "PASS_MIN_DAYS" "$MIN_DAYS" /etc/login.defs " "
+    set_kv "PASS_WARN_AGE" "$WARN_DAYS" /etc/login.defs " "
+    set_kv "ENCRYPT_METHOD" "SHA512" /etc/login.defs " "
+    set_kv "UMASK" "027" /etc/login.defs " "
 
     # Remove nullok
     cp /etc/pam.d/common-auth /etc/pam.d/common-auth.cpbak
@@ -392,7 +508,7 @@ EOF
     # Configure pwquality
     for kv in "minlen=$MIN_LEN" "dcredit=-1" "ucredit=-1" "lcredit=-1" "ocredit=-1" "retry=3"; do
       k="${kv%%=*}"; v="${kv##*=}"
-      set_conf "$k" "$v" /etc/security/pwquality.conf " = "
+      set_kv "$k" "$v" /etc/security/pwquality.conf " = "
     done
     log "Enforced password complexity and password history (remember=5)"
   fi
@@ -403,9 +519,47 @@ EOF
 # ---------------------------------------------------------------------
 sec_sudoers() {
   echo -e "\n${Y}=== Module 4: Sudoers & Privilege Delegation Hardening ===${N}"
-  if ask "Audit sudoers configuration for NOPASSWD and enforce sudo logging?"; then
-    # Backup sudoers
+  if ask "Audit sudoers configuration for unauthorized ALL grants, NOPASSWD, and !authenticate?"; then
     cp /etc/sudoers /etc/sudoers.cpbak
+
+    # Clean /etc/sudoers and /etc/sudoers.d/ files
+    clean_sudo_file() {
+      local sf="$1"
+      [ -f "$sf" ] || return
+      cp "$sf" "${sf}.bak"
+
+      # Strip NOPASSWD and !authenticate
+      sed -i -E 's/NOPASSWD:[[:space:]]*//g; s/!authenticate[[:space:]]*,?[[:space:]]*//g' "$sf"
+
+      # Comment out non-comment lines granting ALL to users/groups not in ADMIN_USERS
+      while read -r line; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$line" ]] && continue
+        if [[ "$line" =~ ALL[[:space:]]*=[[:space:]]*\(?ALL.*\)?[[:space:]]*ALL ]]; then
+          entity=$(echo "$line" | awk '{print $1}')
+          clean_entity="${entity#%}"
+          if [ "$clean_entity" != "root" ] && [ "$clean_entity" != "sudo" ] && [ "$clean_entity" != "admin" ]; then
+            if ! inlist "$clean_entity" "$ADMIN_USERS"; then
+              escaped_line=$(printf '%s\n' "$line" | sed 's/[[\.*^$()+?{|]/\\&/g')
+              sed -i "s|^${escaped_line}|# UNKNOWN ADMIN REMOVED: ${line}|g" "$sf" 2>/dev/null || sed -i "s|^|# UNKNOWN ADMIN REMOVED: |g" "$sf"
+              log "Commented out unauthorized sudoers line in $sf: $line"
+            fi
+          fi
+        fi
+      done < "${sf}.bak"
+
+      if ! visudo -cf "$sf" >/dev/null 2>&1; then
+        warn "visudo validation failed for $sf! Restoring backup."
+        cp "${sf}.bak" "$sf"
+      else
+        rm -f "${sf}.bak"
+      fi
+    }
+
+    clean_sudo_file /etc/sudoers
+    for dropin in /etc/sudoers.d/*; do
+      [ -f "$dropin" ] && clean_sudo_file "$dropin"
+    done
 
     # Create drop-in hardening rule
     cat > /etc/sudoers.d/99-cp-hardening <<'EOF'
@@ -414,21 +568,11 @@ Defaults logfile="/var/log/sudo.log"
 EOF
     chmod 440 /etc/sudoers.d/99-cp-hardening
 
-    # Validate with visudo
     if visudo -c >/dev/null 2>&1; then
       log "Hardened sudoers options (use_pty, logfile) verified"
     else
       warn "visudo syntax check failed. Rolling back sudoers drop-in."
       rm -f /etc/sudoers.d/99-cp-hardening
-    fi
-
-    # Remove NOPASSWD entries if user confirms
-    if grep -rE "NOPASSWD" /etc/sudoers /etc/sudoers.d/ 2>/dev/null; then
-      if ask_timed "NOPASSWD entries found in sudoers! Strip NOPASSWD automatically?"; then
-        sed -i 's/NOPASSWD://g' /etc/sudoers /etc/sudoers.d/* 2>/dev/null
-        visudo -c >/dev/null 2>&1 || cp /etc/sudoers.cpbak /etc/sudoers
-        log "Stripped NOPASSWD entries from sudoers"
-      fi
     fi
   fi
 }
@@ -480,6 +624,7 @@ sec_perms() {
     chown root:root /etc/passwd /etc/group; chmod 644 /etc/passwd /etc/group
     chmod 440 /etc/sudoers 2>/dev/null; chmod 440 /etc/sudoers.d/* 2>/dev/null
     chmod 600 /etc/crontab /etc/ssh/sshd_config /boot/grub/grub.cfg 2>/dev/null
+    chown root:root /boot/grub/grub.cfg 2>/dev/null
     chmod 700 /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly 2>/dev/null
 
     # Non-recursive 750 on user home directories
@@ -527,10 +672,16 @@ sec_ssh() {
         fi
       done
 
+      # Clear non-default SSH key directives in sshd_config & drop-ins
+      for f in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*; do
+        [ -f "$f" ] || continue
+        sed -i -E 's/^[[:space:]]*#?[[:space:]]*(AuthorizedKeysFile|AuthorizedKeysCommand|TrustedUserCAKeys)[[:space:]].*/# Directive cleared/g' "$f"
+      done
+
       # Backup sshd_config
       cp /etc/ssh/sshd_config /etc/ssh/sshd_config.cpbak
 
-      # Re-write SSH options at top using temporary file to prevent line number shifts
+      # Re-write SSH options at top using temporary file
       tmp_sshd=$(mktemp)
       {
         echo "PermitRootLogin no"
@@ -551,6 +702,8 @@ sec_ssh() {
       if sshd -t 2>/dev/null; then
         systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
         log "SSH hardened successfully"
+        echo "Effective SSH Settings:"
+        sshd -T 2>/dev/null | grep -E "permitrootlogin|passwordauthentication|permitemptypasswords|x11forwarding|maxauthtries|allowusers" | sed 's/^/    /'
       else
         warn "sshd -t syntax check failed! Rolling back to sshd_config backup."
         cp /etc/ssh/sshd_config.cpbak /etc/ssh/sshd_config
@@ -561,26 +714,46 @@ sec_ssh() {
 }
 
 # ---------------------------------------------------------------------
-# 8. PROHIBITED SOFTWARE & SERVICE PURGING
+# 8. PROHIBITED SOFTWARE & SERVICE PURGING (WITH FAMILY MAP & DEPENDENCY GUARD)
 # ---------------------------------------------------------------------
 sec_remove() {
   echo -e "\n${Y}=== Module 8: Prohibited Software & Service Removal ===${N}"
   if ask "Purge unauthorized server services and hacking tools?"; then
     apt-get update -qq
-    for pkg in $BAD_SERVICE_PKGS $PROHIBITED_PKGS; do
-      base_pkg="${pkg%%\*}"
-      if inlist "$base_pkg" "$KEEP_SERVICES" || inlist "$pkg" "$KEEP_SERVICES"; then
-        log "Skipping package $pkg (listed in KEEP_SERVICES)"
-        continue
-      fi
-      dpkg-query -W -f='${Package}\n' "$pkg" 2>/dev/null | while read -r match_pkg; do
-        if [ -n "$match_pkg" ]; then
-          if inlist "$match_pkg" "$KEEP_SERVICES"; then
-            log "Skipping installed package $match_pkg (listed in KEEP_SERVICES)"
+
+    is_kept_family() {
+      local p="$1"
+      for kf in $KEPT_FAMILIES $KEEP_SERVICES $REQUIRED_SOFTWARE; do
+        # shellcheck disable=SC2053
+        if [[ "$p" == $kf ]]; then return 0; fi
+      done
+      return 1
+    }
+
+    for candidate_pattern in $BAD_SERVICE_PKGS $PROHIBITED_PKGS; do
+      dpkg-query -W -f='${Package}\n' "$candidate_pattern" 2>/dev/null | while read -r inst_p; do
+        if [ -n "$inst_p" ]; then
+          if is_kept_family "$inst_p"; then
+            log "Skipped purge of $inst_p (matches kept family or service)"
             continue
           fi
-          systemctl disable --now "$match_pkg" 2>/dev/null
-          $APT purge "$match_pkg" >/dev/null 2>&1 && log "Purged prohibited package: $match_pkg"
+
+          # Dependency Guard via simulation
+          sim_out=$(apt-get -s purge "$inst_p" 2>/dev/null)
+          removed_deps=$(echo "$sim_out" | grep -E "^Remv " | awk '{print $2}')
+          blocked="no"
+          for dep in $removed_deps; do
+            if is_kept_family "$dep" || [[ "$dep" =~ ^(ssh|openssh|ufw|sudo|apparmor|auditd|libpam-|network-manager|ubuntu-desktop|ubuntu-minimal|linuxmint|mint-meta-|cinnamon|lightdm|gdm3|systemd) ]]; then
+              warn "Skipped purge of $inst_p (would remove protected package $dep)"
+              blocked="yes"
+              break
+            fi
+          done
+
+          if [ "$blocked" = "no" ]; then
+            systemctl disable --now "$inst_p" 2>/dev/null
+            $APT purge "$inst_p" >/dev/null 2>&1 && log "Purged prohibited package: $inst_p"
+          fi
         fi
       done
     done
@@ -589,7 +762,7 @@ sec_remove() {
 }
 
 # ---------------------------------------------------------------------
-# 9. BACKDOOR & PERSISTENCE SWEEP (dpkg -S Netcat Purge + Startup + Cron)
+# 9. BACKDOOR, CRON & SYSTEMD PERSISTENCE SWEEP
 # ---------------------------------------------------------------------
 sec_backdoor() {
   echo -e "\n${Y}=== Module 9: Backdoor & Persistence Sweep ===${N}"
@@ -610,21 +783,40 @@ sec_backdoor() {
       kill -9 "$pid" 2>/dev/null && log "Killed backdoor PID $pid"
     done
 
-    # Trace perl/python/ruby network listeners
-    lsof -i -n -P 2>/dev/null | grep LISTEN | grep -E "perl|python|ruby" | while read -r line; do
-      pid=$(echo "$line" | awk '{print $2}')
-      pcmd=$(tr '\0' ' ' < /proc/"$pid"/cmdline 2>/dev/null)
-      warn "Found network-connected script interpreter PID $pid: $pcmd"
-      if ask_timed "Kill network script listener PID $pid?"; then
-        kill -9 "$pid" 2>/dev/null && log "Killed script backdoor PID $pid"
+    # Trace perl/python/ruby network listeners (if lsof or ss available)
+    if command -v lsof >/dev/null 2>&1; then
+      lsof -i -n -P 2>/dev/null | grep LISTEN | grep -E "perl|python|ruby" | while read -r line; do
+        pid=$(echo "$line" | awk '{print $2}')
+        pcmd=$(tr '\0' ' ' < /proc/"$pid"/cmdline 2>/dev/null)
+        warn "Found network-connected script interpreter PID $pid: $pcmd"
+        if ask_timed "Kill network script listener PID $pid?"; then
+          kill -9 "$pid" 2>/dev/null && log "Killed script backdoor PID $pid"
+        fi
+      done
+    fi
+
+    # Scan cron for suspicious persistent lines
+    for cronfile in /etc/crontab /etc/cron.d/* /var/spool/cron/crontabs/* /etc/cron.hourly/* /etc/cron.daily/*; do
+      [ -f "$cronfile" ] || continue
+      if grep -qE "/tmp|/dev/shm|/var/tmp|nc|ncat|netcat|socat|bash -i|curl.*\||wget.*\||python|perl|ruby|base64" "$cronfile" 2>/dev/null; then
+        warn "Suspicious persistence entry in $cronfile"
+        if ask_timed "Clean suspicious persistence lines in $cronfile?"; then
+          sed -i -E '/(\/tmp|\/dev\/shm|\/var\/tmp|nc|ncat|netcat|socat|bash -i|curl.*\||wget.*\|python|perl|ruby|base64)/d' "$cronfile"
+          log "Cleaned cron file: $cronfile"
+        fi
       fi
     done
 
-    # Executables in /tmp, /var/tmp, /dev/shm
-    find /tmp /var/tmp /dev/shm -type f -executable 2>/dev/null | while read -r bad_exe; do
-      warn "Found executable in temp dir: $bad_exe"
-      if ask_timed "Delete suspicious temp executable $bad_exe?"; then
-        rm -f "$bad_exe" && log "Deleted temp executable: $bad_exe"
+    # Scan systemd service/timer files
+    find /etc/systemd/system ~/.config/systemd/user -type f \( -name "*.service" -o -name "*.timer" \) 2>/dev/null | while read -r unitfile; do
+      if grep -qE "/tmp|/dev/shm|/var/tmp|nc|ncat|netcat|socat|bash -i|curl.*\||wget.*\||python|perl|ruby|base64" "$unitfile" 2>/dev/null; then
+        uname=$(basename "$unitfile")
+        warn "Suspicious systemd unit file: $unitfile"
+        if ask_timed "Disable and delete suspicious systemd unit $uname?"; then
+          systemctl disable --now "$uname" 2>/dev/null
+          rm -f "$unitfile" && log "Deleted suspicious unit file $unitfile"
+          systemctl daemon-reload
+        fi
       fi
     done
 
@@ -633,16 +825,6 @@ sec_backdoor() {
       grep -q "exit 0" /etc/rc.local || echo "exit 0" > /etc/rc.local
     fi
     rm -f /etc/ld.so.preload 2>/dev/null
-
-    # Check user crontabs
-    for u in $(cut -d: -f1 /etc/passwd); do
-      if crontab -l -u "$u" 2>/dev/null | grep -v '^#' | grep -q .; then
-        warn "User $u has active crontab entries!"
-        if ask_timed "Clear active crontab for user $u?"; then
-          crontab -r -u "$u" 2>/dev/null && log "Cleared crontab for user $u"
-        fi
-      fi
-    done
 
     # Clean cron and at allow/deny
     rm -f /etc/cron.deny /etc/at.deny
@@ -653,36 +835,100 @@ sec_backdoor() {
 }
 
 # ---------------------------------------------------------------------
-# 10. PROHIBITED MEDIA, ARCHIVES & HACKING FILES REMOVAL
+# 10. REFINED FILE DELETION SCOPE
 # ---------------------------------------------------------------------
 sec_files() {
-  echo -e "\n${Y}=== Module 10: Prohibited Media, Archives & File Search ===${N}"
-  if ask "Delete prohibited media and archive files (.mp3, .mp4, .zip, .tar, .deb, .exe)?"; then
-    search_dirs="/home /root /tmp /var/tmp /opt /srv"
-    find $search_dirs -xdev -type f \( -iname '*.mp3' -o -iname '*.mp4' -o -iname '*.m4a' -o -iname '*.flac' \
-      -o -iname '*.avi' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.wmv' -o -iname '*.torrent' \
-      -o -iname '*.zip' -o -iname '*.rar' -o -iname '*.7z' -o -iname '*.tar' -o -iname '*.gz' \
-      -o -iname '*.deb' -o -iname '*.exe' \) -not -name "Forensics*" -not -name "README*" -exec rm -f {} + 2>/dev/null
-    log "Deleted prohibited media, archive, and installer files in $search_dirs"
+  echo -e "\n${Y}=== Module 10: Prohibited Media & Archive File Search ===${N}"
+  if ask "Delete prohibited media and archive files (.mp3, .zip, .tar, .deb, etc.)?"; then
+
+    # 1. Media Files (Anywhere except system/app/service roots)
+    find / -xdev -type f \( -iname '*.mp3' -o -iname '*.mp4' -o -iname '*.m4a' -o -iname '*.flac' \
+      -o -iname '*.wav' -o -iname '*.ogg' -o -iname '*.avi' -o -iname '*.mkv' -o -iname '*.mov' \
+      -o -iname '*.wmv' -o -iname '*.flv' -o -iname '*.mpg' -o -iname '*.mpeg' -o -iname '*.torrent' \) \
+      -not -path "/usr/*" -not -path "/lib*" -not -path "/bin/*" -not -path "/sbin/*" -not -path "/boot/*" \
+      -not -path "/proc/*" -not -path "/sys/*" -not -path "/etc/*" -not -path "/var/lib/*" \
+      -not -path "/var/cache/*" -not -path "/snap/*" -not -path "/opt/*/*" \
+      -not -path "/var/www/*" -not -name "Forensics*" -not -name "README*" 2>/dev/null | while read -r mf; do
+        rm -f "$mf" && log "Deleted media file: $mf"
+    done
+
+    # 2. Archives and Installers under /home, /root, /tmp, /var/tmp, /srv, /opt
+    find /home /root /tmp /var/tmp /srv /opt -xdev -type f \( -iname '*.zip' -o -iname '*.rar' \
+      -o -iname '*.7z' -o -iname '*.tar' -o -iname '*.gz' -o -iname '*.tgz' -o -iname '*.bz2' \
+      -o -iname '*.xz' -o -iname '*.deb' -o -iname '*.rpm' -o -iname '*.exe' -o -iname '*.msi' \
+      -o -iname '*.run' -o -iname '*.AppImage' \) -not -name "Forensics*" -not -name "README*" 2>/dev/null | while read -r af; do
+        parent_dir=$(dirname "$af")
+        if ! dpkg -S "$parent_dir" &>/dev/null; then
+          rm -f "$af" && log "Deleted archive/installer file: $af"
+        fi
+    done
+
+    # 3. Images strictly under user Downloads/Pictures/Documents/Desktop and /tmp
+    find /home/*/{Downloads,Pictures,Documents,Desktop} /tmp -xdev -type f \( -iname '*.jpg' \
+      -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.bmp' \) \
+      -not -name "Forensics*" -not -name "README*" -not -path "*/.mozilla/*" -not -path "*/.config/*" \
+      -not -path "*/.local/*" -not -path "*/.cache/*" 2>/dev/null | while read -r imgf; do
+        rm -f "$imgf" && log "Deleted user image file: $imgf"
+    done
+
+    log "Completed refined file deletion scope"
   fi
 }
 
 # ---------------------------------------------------------------------
-# 11. UFW FIREWALL HARDENING
+# 11. APT SOURCES, HOSTS, RESOLV.CONF & UFW HARDENING
 # ---------------------------------------------------------------------
-sec_ufw() {
-  echo -e "\n${Y}=== Module 11: Host Firewall (UFW) Hardening ===${N}"
-  if ask "Enable UFW firewall with default deny inbound / allow outbound?"; then
+sec_network() {
+  echo -e "\n${Y}=== Module 11: Apt Sources, Hosts File, Resolv.conf & UFW Firewall ===${N}"
+  if ask "Clean Apt sources, /etc/hosts, DNS resolv.conf, and configure UFW?"; then
+    # Apt Sources Cleaning
+    for sfile in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+      [ -f "$sfile" ] || continue
+      sed -i -E '/(archive\.ubuntu\.com|security\.ubuntu\.com|packages\.linuxmint\.com|ppa\.launchpadcontent\.net)/! { s/^[[:space:]]*deb[[:space:]]/# DELETED REPO: deb /g }' "$sfile"
+    done
+    log "Cleaned Apt sources list to official release repositories"
+
+    # /etc/hosts Cleaning
+    hosts_tmp=$(mktemp)
+    grep -E "^\s*#|^\s*127\.0\.0\.1|^\s*::1|^\s*127\.0\.1\.1|fe00::0|ff00::0|ff02::" /etc/hosts > "$hosts_tmp"
+    cp "$hosts_tmp" /etc/hosts && rm -f "$hosts_tmp"
+    log "Cleaned /etc/hosts to default loopback entries"
+
+    # /etc/resolv.conf
+    if [ ! -L /etc/resolv.conf ]; then
+      echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > /etc/resolv.conf
+      log "Configured static DNS in /etc/resolv.conf"
+    elif [ -f /etc/systemd/resolved.conf ]; then
+      set_kv "DNS" "8.8.8.8 1.1.1.1" /etc/systemd/resolved.conf " = "
+      systemctl restart systemd-resolved 2>/dev/null
+    fi
+
+    # UFW Firewall Pruning
     $APT install ufw >/dev/null 2>&1
     ufw default deny incoming >/dev/null
     ufw default allow outgoing >/dev/null
+
+    # Prune non-matching allow rules in reverse order
+    ufw status numbered 2>/dev/null | grep -E "\[[ 0-9]+\]" | sort -rn | while read -r rline; do
+      rnum=$(echo "$rline" | awk -F'[' '{print $2}' | awk -F']' '{print $1}')
+      rport=$(echo "$rline" | awk '{print $2}')
+      keep_rule="no"
+      [ "$SSH_REQUIRED" = "yes" ] && [[ "$rport" == *"22"* ]] && keep_rule="yes"
+      for p in $UFW_ALLOW; do
+        if [[ "$rport" == *"$p"* ]]; then keep_rule="yes"; break; fi
+      done
+      if [ "$keep_rule" = "no" ]; then
+        echo "y" | ufw delete "$rnum" >/dev/null 2>&1
+      fi
+    done
+
     [ "$SSH_REQUIRED" == "yes" ] && ufw allow 22/tcp >/dev/null
     for port in $UFW_ALLOW; do
-      ufw allow "$port" >/dev/null && log "UFW allowed port: $port"
+      ufw allow "$port" >/dev/null
     done
     ufw --force enable >/dev/null
     systemctl enable ufw >/dev/null 2>&1
-    log "UFW Firewall enabled"
+    log "UFW Firewall configured and active"
   fi
 }
 
@@ -695,10 +941,8 @@ sec_defenses() {
     $APT install auditd apparmor apparmor-utils fail2ban rsyslog >/dev/null 2>&1
     systemctl enable --now auditd apparmor fail2ban rsyslog >/dev/null 2>&1
 
-    # AppArmor Enforce
     aa-enforce /etc/apparmor.d/* >/dev/null 2>&1
 
-    # Configure auditd rules
     cat > /etc/audit/rules.d/cp.rules <<'EOF'
 -w /etc/passwd -p wa -k identity
 -w /etc/shadow -p wa -k identity
@@ -710,17 +954,13 @@ EOF
     augenrules --load >/dev/null 2>&1
     auditctl -e 1 >/dev/null 2>&1
 
-    # Disable Core Dumps
     echo "* hard core 0" >> /etc/security/limits.conf
-    set_conf "Storage" "none" /etc/systemd/coredump.conf
+    set_kv "Storage" "none" /etc/systemd/coredump.conf " = "
 
-    # /etc/host.conf nospoof on
     if ! grep -q "nospoof on" /etc/host.conf 2>/dev/null; then
       echo "nospoof on" >> /etc/host.conf
-      log "Enforced nospoof on in /etc/host.conf"
     fi
 
-    # Disable Guest/Autologin in LightDM or GDM
     mkdir -p /etc/lightdm/lightdm.conf.d
     cat > /etc/lightdm/lightdm.conf.d/99-cp-hardening.conf <<'EOF'
 [Seat:*]
@@ -730,7 +970,7 @@ autologin-guest=false
 EOF
 
     if [ -f /etc/gdm3/custom.conf ]; then
-      sed -i -E 's/^[[:space:]]*AutomaticLoginEnable=.*/AutomaticLoginEnable=false/' /etc/gdm3/custom.conf
+      set_ini "daemon" "AutomaticLoginEnable" "false" /etc/gdm3/custom.conf
     fi
 
     # Linux Mint Update Manager System DConf Database
@@ -745,12 +985,10 @@ auto-refresh=true
 EOF
     dconf update >/dev/null 2>&1 && log "Configured Mint Update Manager auto-refresh via dconf update"
 
-    # Disable USB storage / Firewire
     echo "install usb-storage /bin/true" > /etc/modprobe.d/disable-usb-storage.conf
     echo "blacklist firewire-core" > /etc/modprobe.d/firewire.conf
     echo "blacklist thunderbolt" >> /etc/modprobe.d/firewire.conf
 
-    # Mask Ctrl-Alt-Del
     systemctl mask ctrl-alt-del.target >/dev/null 2>&1
     log "Auditd, AppArmor, Display Manager hardened, USB storage disabled"
   fi
@@ -769,46 +1007,89 @@ sec_services() {
 ServerTokens Prod
 ServerSignature Off
 TraceEnable Off
+<Directory /var/www/>
+    Options -Indexes
+</Directory>
 EOF
       a2enconf cp-hardening >/dev/null 2>&1
+      if grep -q "Ubuntu - It works" /var/www/html/index.html 2>/dev/null; then
+        rm -f /var/www/html/index.html
+      fi
+      chown -R root:root /var/www/html 2>/dev/null
+      chmod -R 755 /var/www/html 2>/dev/null
       if apache2ctl configtest >/dev/null 2>&1; then
         systemctl restart apache2 2>/dev/null && log "Hardened Apache web server"
       else
         a2disconf cp-hardening >/dev/null 2>&1
       fi
     fi
+
     # Nginx
-    if [ -f /etc/nginx/nginx.conf ]; then
-      set_conf "server_tokens" "off;" /etc/nginx/nginx.conf
-      systemctl restart nginx 2>/dev/null && log "Hardened Nginx web server"
+    if [ -d /etc/nginx ]; then
+      cat > /etc/nginx/conf.d/cp-hardening.conf <<'EOF'
+server_tokens off;
+EOF
+      if nginx -t >/dev/null 2>&1; then
+        systemctl reload nginx 2>/dev/null && log "Hardened Nginx web server"
+      else
+        rm -f /etc/nginx/conf.d/cp-hardening.conf
+      fi
     fi
+
     # VSFTPD
     if [ -f /etc/vsftpd.conf ]; then
-      set_conf "anonymous_enable" "NO" /etc/vsftpd.conf
-      set_conf "chroot_local_user" "YES" /etc/vsftpd.conf
+      cp /etc/vsftpd.conf /etc/vsftpd.conf.cpbak
+      set_kv "anonymous_enable" "NO" /etc/vsftpd.conf
+      set_kv "local_enable" "YES" /etc/vsftpd.conf
+      set_kv "write_enable" "YES" /etc/vsftpd.conf
+      set_kv "chroot_local_user" "YES" /etc/vsftpd.conf
+      set_kv "allow_writeable_chroot" "YES" /etc/vsftpd.conf
       systemctl restart vsftpd 2>/dev/null && log "Hardened VSFTPD server"
     fi
+
     # Samba
     if [ -f /etc/samba/smb.conf ]; then
-      set_conf "map to guest" "Bad User" /etc/samba/smb.conf
-      systemctl restart smbd 2>/dev/null && log "Hardened Samba file server"
+      cp /etc/samba/smb.conf /etc/samba/smb.conf.cpbak
+      set_ini "global" "map to guest" "Bad User" /etc/samba/smb.conf
+      set_ini "global" "restrict anonymous" "2" /etc/samba/smb.conf
+      set_ini "global" "server min protocol" "SMB2" /etc/samba/smb.conf
+      set_ini "global" "server signing" "mandatory" /etc/samba/smb.conf
+
+      awk '
+        /^\[/ { in_share = ($0 !~ /^\[(global|homes|printers)\]/) }
+        in_share && /^[[:space:]]*guest ok[[:space:]]*=/ { print "   guest ok = no"; next }
+        { print }
+      ' /etc/samba/smb.conf > /etc/samba/smb.conf.tmp && mv /etc/samba/smb.conf.tmp /etc/samba/smb.conf
+
+      if testparm -s >/dev/null 2>&1; then
+        systemctl restart smbd 2>/dev/null && log "Hardened Samba file server"
+      else
+        cp /etc/samba/smb.conf.cpbak /etc/samba/smb.conf
+      fi
     fi
+
     # MySQL / MariaDB
-    for myconf in /etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/my.cnf; do
-      if [ -f "$myconf" ]; then
-        set_conf "bind-address" "127.0.0.1" "$myconf"
-        set_conf "local-infile" "0" "$myconf"
-        systemctl restart mysql 2>/dev/null || systemctl restart mariadb 2>/dev/null
-        log "Hardened MySQL / MariaDB server"
-        break
+    for myconf in /etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/mariadb.conf.d/50-server.cnf /etc/mysql/conf.d/cp-hardening.cnf; do
+      if [ -f "$myconf" ] || [ "$myconf" = "/etc/mysql/conf.d/cp-hardening.cnf" ]; then
+        set_ini "mysqld" "bind-address" "127.0.0.1" "$myconf"
+        set_ini "mysqld" "local-infile" "0" "$myconf"
+        if systemctl restart mysql 2>/dev/null || systemctl restart mariadb 2>/dev/null; then
+          log "Hardened MySQL / MariaDB server ($myconf)"
+          break
+        fi
       fi
     done
+
     # PHP
     for phpini in /etc/php/*/*/php.ini; do
       if [ -f "$phpini" ]; then
-        set_conf "expose_php" "Off" "$phpini"
-        set_conf "display_errors" "Off" "$phpini"
-        set_conf "disable_functions" "exec,passthru,shell_exec,system,proc_open,popen" "$phpini"
+        set_kv "expose_php" "Off" "$phpini"
+        set_kv "display_errors" "Off" "$phpini"
+        set_kv "disable_functions" "exec,passthru,shell_exec,system,proc_open,popen" "$phpini"
+        if [ "$REQ_PHP" = "yes" ] && { [ "$REQ_APACHE" = "yes" ] || [ "$REQ_NGINX" = "yes" ]; }; then
+          set_kv "allow_url_fopen" "Off" "$phpini"
+          set_kv "allow_url_include" "Off" "$phpini"
+        fi
         log "Hardened PHP configuration in $phpini"
       fi
     done
@@ -847,10 +1128,8 @@ sec_health() {
   check_fail() { echo -e "  [$R FAIL $N] $1"; ((f_count++)); }
   check_skip() { echo -e "  [$Y SKIP $N] $1"; ((s_count++)); }
 
-  # 1. Visudo check
   if visudo -c >/dev/null 2>&1; then check_pass "Sudoers syntax valid"; else check_fail "Sudoers syntax invalid"; fi
 
-  # 2. Sudo privilege check for admins
   for a in $ADMIN_USERS; do
     if id "$a" &>/dev/null; then
       if sudo -l -U "$a" 2>/dev/null | grep -q "ALL"; then
@@ -861,7 +1140,6 @@ sec_health() {
     fi
   done
 
-  # 3. User existence and runuser test
   for u in $AUTHORIZED_USERS; do
     if getent passwd "$u" >/dev/null; then
       if runuser -u "$u" -- true 2>/dev/null; then
@@ -874,14 +1152,12 @@ sec_health() {
     fi
   done
 
-  # 4. PAM configuration check
   if grep -q "pam_unix.so" /etc/pam.d/common-auth && grep -q "pam_unix.so" /etc/pam.d/common-password; then
     check_pass "PAM common-auth and common-password files parse correctly"
   else
     check_fail "PAM configuration missing pam_unix.so entries"
   fi
 
-  # 5. SSHD check
   if [ "$SSH_REQUIRED" = "yes" ]; then
     if sshd -t 2>/dev/null; then check_pass "SSHD configuration syntax valid"; else check_fail "SSHD configuration syntax invalid"; fi
     if ss -tlpn | grep -q ":22 "; then check_pass "SSH port 22 listening"; else check_fail "SSH port 22 not listening"; fi
@@ -889,10 +1165,8 @@ sec_health() {
     check_skip "SSH service check skipped per configuration"
   fi
 
-  # 6. UFW status
   if ufw status | grep -q "active"; then check_pass "UFW firewall active"; else check_fail "UFW firewall inactive"; fi
 
-  # 7. Required services check
   for s in $KEEP_SERVICES; do
     real_unit="$s"
     [ "$s" = "samba" ] && real_unit="smbd"
@@ -939,7 +1213,7 @@ sec_ssh
 sec_remove
 sec_backdoor
 sec_files
-sec_ufw
+sec_network
 sec_defenses
 sec_services
 sec_upgrade
@@ -952,7 +1226,7 @@ echo -e "${G}====================================================${N}"
 echo "Summary file written to: $SUMMARY"
 echo "Log file written to    : $LOG"
 
-if [ "$NON_INTERACTIVE" != "yes" ]; then
+if [ "$NON_INTERACTIVE" != "yes" ] && [ "$SELF_TEST" != "yes" ]; then
   if ask "Open the change summary file now?"; then
     cat "$SUMMARY"
   fi

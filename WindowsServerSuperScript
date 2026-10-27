@@ -11,6 +11,7 @@
 
 param(
     [switch]$Force,
+    [switch]$SelfTest,
     [string]$Users,
     [string]$Admins,
     [string]$Keep,
@@ -45,8 +46,13 @@ function Confirm-Timed([string]$msg, [int]$timeoutSec=10) {
         $resp = $null
         $startTime = Get-Date
         while (((Get-Date) - $startTime).TotalSeconds -lt $timeoutSec) {
-            if ([Console]::KeyAvailable) {
-                $resp = Read-Host
+            try {
+                if ([Console]::KeyAvailable) {
+                    $resp = Read-Host
+                    break
+                }
+            } catch {
+                # Fallback if Console handles are redirected / unassisted
                 break
             }
             Start-Sleep -Milliseconds 100
@@ -86,7 +92,7 @@ Write-Host "==========================================================" -Foregro
 # ---------------------------------------------------------------------
 # FORENSICS GATE
 # ---------------------------------------------------------------------
-if (-not $Force) {
+if (-not $Force -and -not $SelfTest) {
     Write-Host "`n*** FORENSICS GATE ***" -ForegroundColor Red
     Write-Host "Before running remediation scripts, confirm you have completed all Forensics Questions!" -ForegroundColor Yellow
     while ($true) {
@@ -135,11 +141,12 @@ $NewPasswordInput = if ($Password) { $Password } else { Read-Host "Enter Default
 $NewPassword = if ([string]::IsNullOrWhiteSpace($NewPasswordInput)) { 'Cyb3r-Pat!2026-xQz' } else { $NewPasswordInput }
 
 $autoDC = (Get-CimInstance Win32_ComputerSystem).DomainRole -ge 4
-if (-not $Force) {
+if (-not $Force -and -not $SelfTest) {
     $IsDomainController = Confirm-Prompt "Is this server an Active Directory Domain Controller? (Auto-detected: $autoDC)" $autoDC
     $RDPRequired = Confirm-Prompt "Is Remote Desktop (RDP) explicitly required by the README?" $false
     $IISRequired = Confirm-Prompt "Is Web Server (IIS) explicitly required by the README?" $false
     $FTPRequired = Confirm-Prompt "Is FTP Service explicitly required by the README?" $false
+    $SMBSharingRequired = Confirm-Prompt "Is file/printer sharing or SMB access explicitly required by the README?" $false
 
     $UsersToCreateInput = Read-Host "Enter Users/Groups to CREATE if missing (e.g., 'newuser1,newuser2')"
     $UsersToCreate = @($UsersToCreateInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -151,7 +158,7 @@ if (-not $Force) {
     $script:ALL_MODULES = Confirm-Prompt "Run ALL modules automatically without section prompts?" $false
 } else {
     $IsDomainController = $autoDC
-    $RDPRequired = $false; $IISRequired = $false; $FTPRequired = $false
+    $RDPRequired = $false; $IISRequired = $false; $FTPRequired = $false; $SMBSharingRequired = $false
     $script:FAST_MODE = $true; $script:ALL_MODULES = $true
 }
 
@@ -163,15 +170,29 @@ Write-Host "Domain Controller    : $IsDomainController"
 Write-Host "Authorized Users     : $($AuthorizedUsers -join ', ')"
 Write-Host "Authorized Admins    : $($AuthorizedAdmins -join ', ')"
 Write-Host "Keep Services        : $($KeepServices -join ', ')"
-Write-Host "RDP Required         : $RDPRequired | IIS Required: $IISRequired | FTP Required: $FTPRequired"
+Write-Host "RDP Required         : $RDPRequired | IIS Required: $IISRequired | FTP Required: $FTPRequired | SMB Sharing: $SMBSharingRequired"
 Write-Host "Run Mode             : FAST_MODE=$script:FAST_MODE | ALL_MODULES=$script:ALL_MODULES"
 Write-Host "====================================================" -ForegroundColor Green
 
-if (-not $Force) {
+if (-not $Force -and -not $SelfTest) {
     if (-not (Confirm-Prompt "Proceed with hardening using these parameters?")) {
         Write-Host "Aborted by user." -ForegroundColor Red
         exit
     }
+}
+
+# SELF-TEST SWITCH IMPLEMENTATION
+if ($SelfTest) {
+    Write-Host "`n=== RUNNING SCRIPT SELF-TEST (NO CHANGES MADE) ===" -ForegroundColor Green
+    Write-Host "Target Configuration Files & Options to be Hardened:"
+    Write-Host "  - Local Security Policy (secedit INF/SDB) & SID User Rights Assignment"
+    Write-Host "  - Active Directory Domain Policy & Domain Admins Group Enforcement (Domain Controller: $IsDomainController)"
+    Write-Host "  - Windows Server Security Options (LSA, LDAP Signing, Channel Binding, UAC Max, CAD)"
+    Write-Host "  - Network Adapter Component Bindings (SMB Sharing: $SMBSharingRequired)"
+    Write-Host "  - Persistence Sweep (IFEO, WMI, Scheduled Tasks, Run/RunOnce Keys, Startup Folders)"
+    Write-Host "  - Prohibited Software & Media Deletion Scope"
+    Write-Host "`nSelf-test complete. Exiting without making modifications." -ForegroundColor Green
+    exit
 }
 
 $builtin = @('Administrator','Guest','krbtgt','DefaultAccount','WDAGUtilityAccount')
@@ -189,6 +210,22 @@ try {
 # 1. ACCOUNTS & PRIVILEGES (LOCAL OR AD)
 # ---------------------------------------------------------------------
 Section "1. User Accounts & Group Memberships"
+
+# Create any requested Users/Groups
+foreach ($nu in $UsersToCreate) {
+    if ($IsDomainController -and (Get-Module -ListAvailable ActiveDirectory)) {
+        if (-not (Get-ADUser -Filter "SamAccountName -eq '$nu'" -ErrorAction SilentlyContinue)) {
+            New-ADUser -Name $nu -SamAccountName $nu -AccountPassword $sec -Enabled $true -PasswordNeverExpires $false -ChangePasswordAtLogon $false -ErrorAction SilentlyContinue
+            Info "Created requested AD user $nu"
+        }
+    } else {
+        if (-not (Get-LocalUser -Name $nu -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $nu -Password $sec -PasswordNeverExpires $false -ErrorAction SilentlyContinue | Out-Null
+            Add-LocalGroupMember -Group 'Users' -Member $nu -ErrorAction SilentlyContinue | Out-Null
+            Info "Created requested local user $nu"
+        }
+    }
+}
 
 if ($IsDomainController -and (Get-Module -ListAvailable ActiveDirectory)) {
     Import-Module ActiveDirectory
@@ -231,8 +268,8 @@ if ($IsDomainController -and (Get-Module -ListAvailable ActiveDirectory)) {
             if ($sam -eq $current -or $sam -in $builtin) { continue }
             if ($sam -in $AuthorizedUsers -or $sam -in $AuthorizedAdmins) {
                 Set-ADAccountPassword -Identity $u -Reset -NewPassword $sec -ErrorAction SilentlyContinue
-                Set-ADUser -Identity $u -PasswordNeverExpires $false -ErrorAction SilentlyContinue
-                Info "Updated password and expiration for AD account $sam"
+                Set-ADUser -Identity $u -PasswordNotRequired $false -PasswordNeverExpires $false -ErrorAction SilentlyContinue
+                Info "Updated password, PasswordNotRequired=false, and PasswordNeverExpires=false for AD account $sam"
             }
         }
         Write-Host "[!] Password reset applied to authorized AD domain accounts. Default password set." -ForegroundColor Yellow
@@ -243,6 +280,9 @@ if ($IsDomainController -and (Get-Module -ListAvailable ActiveDirectory)) {
         foreach ($u in Get-LocalUser) {
             if ($u.Name -in $builtin -or $u.Name -eq $current) { continue }
             if ($u.Name -notin $AuthorizedUsers -and $u.Name -notin $AuthorizedAdmins) {
+                if (-not $u.PasswordRequired -or $u.PasswordNeverExpires) {
+                    Warn "Unauthorized account $($u.Name) had weak flags: PasswordRequired=$($u.PasswordRequired), PasswordNeverExpires=$($u.PasswordNeverExpires)"
+                }
                 if ($script:FAST_MODE -or (Confirm-Prompt "Remove UNAUTHORIZED user '$($u.Name)'?")) {
                     Remove-LocalUser -Name $u.Name -ErrorAction SilentlyContinue
                     Info "Removed user $($u.Name)"
@@ -256,7 +296,7 @@ if ($IsDomainController -and (Get-Module -ListAvailable ActiveDirectory)) {
             if ($u.Name -in $AuthorizedUsers -or $u.Name -in $AuthorizedAdmins) {
                 Set-LocalUser -Name $u.Name -Password $sec -PasswordNeverExpires $false -ErrorAction SilentlyContinue
                 net user $u.Name /passwordreq:yes | Out-Null
-                Info "Updated password and expiration for $($u.Name)"
+                Info "Updated password, PasswordRequired=true, and PasswordNeverExpires=false for $($u.Name)"
             }
         }
         Write-Host "[!] Password reset applied to authorized local accounts. Default password set." -ForegroundColor Yellow
@@ -307,11 +347,11 @@ SeCreateGlobalPrivilege = *S-1-5-32-544,*S-1-5-19,*S-1-5-20,*S-1-5-6
 SeCreatePermanentPrivilege =
 SeCreateSymbolicLinkPrivilege = *S-1-5-32-544
 SeDebugPrivilege = *S-1-5-32-544
-SeDenyNetworkLogonRight = *S-1-5-32-546
+SeDenyNetworkLogonRight = *S-1-5-32-546,*S-1-5-113
 SeDenyBatchLogonRight = *S-1-5-32-546
 SeDenyServiceLogonRight = *S-1-5-32-546
 SeDenyInteractiveLogonRight = *S-1-5-32-546
-SeDenyRemoteInteractiveLogonRight = *S-1-5-32-546
+SeDenyRemoteInteractiveLogonRight = *S-1-5-32-546,*S-1-5-113
 SeRemoteShutdownPrivilege = *S-1-5-32-544
 SeAuditPrivilege = *S-1-5-19,*S-1-5-20
 SeImpersonatePrivilege = *S-1-5-32-544,*S-1-5-19,*S-1-5-20,*S-1-5-6
@@ -319,7 +359,7 @@ SeIncreaseBasePriorityPrivilege = *S-1-5-32-544
 SeLoadDriverPrivilege = *S-1-5-32-544
 SeSecurityPrivilege = *S-1-5-32-544
 SeBatchLogonRight = *S-1-5-32-544
-SeServiceLogonRight =
+SeServiceLogonRight = *S-1-5-32-544
 SeSystemEnvironmentPrivilege = *S-1-5-32-544
 SeManageVolumePrivilege = *S-1-5-32-544
 SeProfileSingleProcessPrivilege = *S-1-5-32-544
@@ -328,6 +368,9 @@ SeAssignPrimaryTokenPrivilege = *S-1-5-19,*S-1-5-20
 SeRestorePrivilege = *S-1-5-32-544
 SeShutdownPrivilege = *S-1-5-32-544,*S-1-5-32-545
 SeTakeOwnershipPrivilege = *S-1-5-32-544
+SeRelabelPrivilege =
+SeLockMemoryPrivilege =
+SeEnableDelegationPrivilege =
 "@
 
     if ($RDPRequired) {
@@ -336,9 +379,14 @@ SeTakeOwnershipPrivilege = *S-1-5-32-544
     }
 
     $infContent | Out-File -FilePath $infPath -Encoding unicode -Force
-    secedit /configure /db $sdb /cfg $infPath /areas SECURITYPOLICY USER_RIGHTS /quiet | Out-Null
-    if ($LASTEXITCODE -ne 0) { Warn "Secedit configuration completed with status code $LASTEXITCODE" }
-    else { Info "Secedit local security policy and user rights assignments applied" }
+    $secLog = Join-Path $env:TEMP 'secedit.log'
+    secedit /configure /db $sdb /cfg $infPath /areas SECURITYPOLICY USER_RIGHTS /log $secLog /quiet | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Warn "Secedit configuration completed with status code $LASTEXITCODE"
+        if (Test-Path $secLog) { Get-Content $secLog -Tail 10 | ForEach-Object { Warn "  [secedit.log] $_" } }
+    } else {
+        Info "Secedit local security policy and user rights assignments applied"
+    }
 }
 
 # ---------------------------------------------------------------------
@@ -480,18 +528,22 @@ if (Confirm-Prompt "Enable Windows Defender Real-Time Protection and Firewall on
 Section "6. Network Adapter Bindings Hardening"
 
 if (Confirm-Prompt "Disable insecure network adapter component bindings?") {
-    foreach ($comp in 'ms_msclient','ms_server','ms_pacer','ms_implat','ms_lltdio','ms_rspndr','ms_tcpip6') {
+    $compsToDisable = @('ms_pacer','ms_implat','ms_lltdio','ms_rspndr','ms_tcpip6')
+    if (-not $SMBSharingRequired) {
+        $compsToDisable += @('ms_msclient','ms_server')
+    }
+    foreach ($comp in $compsToDisable) {
         Disable-NetAdapterBinding -Name '*' -ComponentID $comp -ErrorAction SilentlyContinue
     }
-    Info "Disabled insecure network adapter component bindings"
+    Info "Disabled insecure network adapter component bindings (SMB Sharing Kept: $SMBSharingRequired)"
 }
 
 # ---------------------------------------------------------------------
-# 7. PERSISTENCE SWEEP (IFEO, WMI, Tasks, Run Keys, Hosts File, NetBIOS)
+# 7. PERSISTENCE SWEEP (IFEO, WMI, Tasks, Run Keys, Startup Folders, Services, Hosts)
 # ---------------------------------------------------------------------
-Section "7. Persistence Sweep (IFEO, WMI, Scheduled Tasks, Run Keys, Hosts)"
+Section "7. Persistence Sweep (IFEO, WMI, Scheduled Tasks, Run Keys, Startup Folders, Services, Hosts)"
 
-if (Confirm-Prompt "Sweep IFEO debugger hijacks, WMI subscriptions, Scheduled Tasks, Run keys, and Hosts file?") {
+if (Confirm-Prompt "Sweep IFEO debugger hijacks, WMI subscriptions, Scheduled Tasks, Run keys, Startup folders, Services, and Hosts file?") {
     # IFEO Debugger Hijacks
     foreach ($base in 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows NT\CurrentVersion\Image File Execution Options') {
         Get-ChildItem $base -ErrorAction SilentlyContinue | ForEach-Object {
@@ -521,7 +573,17 @@ if (Confirm-Prompt "Sweep IFEO debugger hijacks, WMI subscriptions, Scheduled Ta
         }
     }
 
-    # Run / RunOnce Keys
+    # Startup Folders Cleaning
+    $startupPaths = @(
+        "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp",
+        "$env:SystemDrive\Users\*\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+    )
+    Get-ChildItem $startupPaths -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'desktop.ini' } | ForEach-Object {
+        Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+        Info "Deleted startup item: $($_.FullName)"
+    }
+
+    # Run / RunOnce Keys Sweep
     foreach ($rk in 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run','HKCU:\Software\Microsoft\Windows\CurrentVersion\Run','HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce') {
         $props = Get-ItemProperty $rk -ErrorAction SilentlyContinue
         if ($props) {
@@ -531,6 +593,15 @@ if (Confirm-Prompt "Sweep IFEO debugger hijacks, WMI subscriptions, Scheduled Ta
                     Info "Removed startup run entry $($p.Name)"
                 }
             }
+        }
+    }
+
+    # Auto-start Services with Suspicious Paths
+    Get-CimInstance Win32_Service | Where-Object { $_.StartMode -eq 'Auto' -and $_.PathName -match '\\Users\\|\\Temp\\|AppData' } | ForEach-Object {
+        if ($_.Name -notin $KeepServices) {
+            Set-Service -Name $_.Name -StartupType Disabled -ErrorAction SilentlyContinue
+            Stop-Service -Name $_.Name -Force -ErrorAction SilentlyContinue
+            Info "Disabled auto-start service with suspicious image path: $($_.Name) ($($_.PathName))"
         }
     }
 
@@ -550,9 +621,42 @@ if (Confirm-Prompt "Sweep IFEO debugger hijacks, WMI subscriptions, Scheduled Ta
 }
 
 # ---------------------------------------------------------------------
-# 8. SERVER ROLES HARDENING (DNS, DHCP, IIS) & FEATURES
+# 8. SERVER ROLES HARDENING (DNS, DHCP, IIS), FEATURES & WINDOWS UPDATE
 # ---------------------------------------------------------------------
-Section "8. Server Roles, Features & Services Hardening"
+Section "8. Server Roles, Features, Windows Update & Services Hardening"
+
+if (Confirm-Prompt "Configure automatic Windows Updates, Browser Policies, and Server Roles?") {
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'NoAutoUpdate' 0
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'AUOptions' 4
+
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' 'SmartScreenEnabled' 1
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' 'DefaultPopupsSetting' 2
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Google\Chrome' 'SafeBrowsingProtectionLevel' 1
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Google\Chrome' 'DefaultPopupsSetting' 2
+
+    # Firefox user.js Hardening
+    $ffPrefs = @'
+user_pref("privacy.donottrackheader.enabled", true);
+user_pref("browser.safebrowsing.malware.enabled", true);
+user_pref("browser.safebrowsing.phishing.enabled", true);
+user_pref("dom.security.https_only_mode", true);
+user_pref("browser.contentblocking.category", "strict");
+'@
+    Get-ChildItem "$env:SystemDrive\Users\*\AppData\Roaming\Mozilla\Firefox\Profiles\*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        Set-Content -Path (Join-Path $_.FullName 'user.js') -Value $ffPrefs -Force -ErrorAction SilentlyContinue
+    }
+
+    # Attempt winget / choco upgrades
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        winget upgrade --all --silent --accept-source-agreements --accept-package-agreements --include-unknown *> $null
+    } elseif (Get-Command choco -ErrorAction SilentlyContinue) {
+        choco upgrade all -y *> $null
+    }
+
+    # Trigger Windows Update
+    UsoClient StartScan
+    Info "Automatic Windows Updates and Browser Policies configured"
+}
 
 if (Get-Command Get-DnsServerZone -ErrorAction SilentlyContinue) {
     if (Confirm-Prompt "Harden DNS Server (disable zone transfers to arbitrary servers)?") {
@@ -683,7 +787,7 @@ Write-Host "==========================================================" -Foregro
 Write-Host "Summary log written to: $SummaryFile" -ForegroundColor Cyan
 Write-Host "Log file written to    : $LogFile" -ForegroundColor Cyan
 
-if (-not $Force) {
+if (-not $Force -and -not $SelfTest) {
     if (Confirm-Prompt "Open the change summary log file now?") {
         Get-Content $SummaryFile
     }
