@@ -9,18 +9,54 @@
   modules for Windows 10/11 Workstations.
 #>
 
+param(
+    [switch]$Force,
+    [string]$Users,
+    [string]$Admins,
+    [string]$Keep,
+    [string]$Ports,
+    [string]$Password
+)
+
 $ErrorActionPreference = 'Continue'
 $LogFile = "C:\Windows\Temp\CP-Windows-Hardening-Log.txt"
+$SummaryFile = "C:\CP-Notes\summary.txt"
+
+if (-not (Test-Path "C:\CP-Notes")) { New-Item -Path "C:\CP-Notes" -ItemType Directory -Force | Out-Null }
 
 function Section([string]$t) { Write-Host "`n=== $t ===" -ForegroundColor Cyan }
-function Info([string]$t)    { Write-Host "[+] $t" -ForegroundColor Green; "$((Get-Date).ToString('T')) [INFO] $t" | Out-File $LogFile -Append }
+function Info([string]$t)    { Write-Host "[+] $t" -ForegroundColor Green; "$((Get-Date).ToString('T')) [INFO] $t" | Out-File $LogFile -Append; "$((Get-Date).ToString('T')) [SCORE-LOG] $t" | Out-File $SummaryFile -Append }
 function Warn([string]$t)    { Write-Host "[!] $t" -ForegroundColor Yellow; "$((Get-Date).ToString('T')) [WARN] $t" | Out-File $LogFile -Append }
 
 function Confirm-Prompt([string]$msg, [bool]$defaultYes=$true) {
+    if ($script:ALL_MODULES) { return $true }
     $suffix = if ($defaultYes) { "[Y/n]" } else { "[y/N]" }
     $resp = Read-Host "$msg $suffix"
     if ([string]::IsNullOrWhiteSpace($resp)) { return $defaultYes }
     return ($resp -match '^(y|yes)$')
+}
+
+function Confirm-Timed([string]$msg, [int]$timeoutSec=10) {
+    if ($script:ALL_MODULES) { return $true }
+    if ($script:FAST_MODE) {
+        Write-Host "$msg [Y/n] (Auto-Y in ${timeoutSec}s): " -NoNewline -ForegroundColor Yellow
+        $resp = $null
+        $startTime = Get-Date
+        while (((Get-Date) - $startTime).TotalSeconds -lt $timeoutSec) {
+            if ([Console]::KeyAvailable) {
+                $resp = Read-Host
+                break
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        if ([string]::IsNullOrWhiteSpace($resp)) {
+            Write-Host " [Timeout -> Auto Y]" -ForegroundColor Yellow
+            return $true
+        }
+        return ($resp -match '^(y|yes)$')
+    } else {
+        return Confirm-Prompt $msg $true
+    }
 }
 
 function Set-RegProperty {
@@ -37,41 +73,105 @@ Write-Host "   CyberPatriot Windows SuperScript (Interactive)   " -ForegroundCol
 Write-Host "====================================================" -ForegroundColor Green
 
 # ---------------------------------------------------------------------
-# INITIAL README SPECIFICS PROMPTS
+# FORENSICS GATE
+# ---------------------------------------------------------------------
+if (-not $Force) {
+    Write-Host "`n*** FORENSICS GATE ***" -ForegroundColor Red
+    Write-Host "Before running remediation scripts, confirm you have completed all Forensics Questions!" -ForegroundColor Yellow
+    while ($true) {
+        $fgated = Read-Host "Have you answered and saved ALL Forensics Questions on Desktop? Type YES to continue"
+        if ($fgated -eq "YES" -or $fgated -eq "yes") { break }
+        Write-Host "Please answer Forensics Questions first, then type YES." -ForegroundColor Red
+    }
+}
+
+# ---------------------------------------------------------------------
+# READ-ONLY FORENSICS & SCENARIO HELPER
+# ---------------------------------------------------------------------
+Section "Forensics & Evidence Helper (Read-Only Scan)"
+Get-ChildItem -Path "$env:SystemDrive\Users\*\Desktop" -Filter "*Forensics*" -ErrorAction SilentlyContinue | ForEach-Object {
+    Info "Found Forensics File: $($_.FullName)"
+    Get-Content $_.FullName -TotalCount 20 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+}
+Info "Listening TCP Connections:"
+Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    Port: $($_.LocalPort) PID: $($_.OwningProcess)" }
+
+# ---------------------------------------------------------------------
+# STEP 0: README DETAILS & PROMPTS
 # ---------------------------------------------------------------------
 Section "0. README Details & Specifics Input"
 
-$AuthUsersInput = Read-Host "Enter ALL Authorized Users (comma-separated, e.g. 'alice,bob,carol')"
+$AuthUsersInput = if ($Users) { $Users } else { Read-Host "Enter ALL Authorized Users (comma-separated, e.g. 'alice,bob,carol')" }
 $AuthorizedUsers = @($AuthUsersInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
-$AuthAdminsInput = Read-Host "Enter Authorized Administrators ONLY (comma-separated, e.g. 'alice,admin1')"
+$AuthAdminsInput = if ($Admins) { $Admins } else { Read-Host "Enter Authorized Administrators ONLY (comma-separated, e.g. 'alice,admin1')" }
 $AuthorizedAdmins = @($AuthAdminsInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
-$KeepServicesInput = Read-Host "Enter Required Services to KEEP (comma-separated, e.g. 'Spooler,WinRM,sshd')"
+$KeepServicesInput = if ($Keep) { $Keep } else { Read-Host "Enter Required Services to KEEP (comma-separated, e.g. 'Spooler,WinRM,sshd')" }
 $KeepServices = @($KeepServicesInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
-$NewPasswordInput = Read-Host "Enter Default Password for Authorized Users [Default: Cyb3r-Pat!2026-xQz]"
+$NewPasswordInput = if ($Password) { $Password } else { Read-Host "Enter Default Password for Authorized Users [Default: Cyb3r-Pat!2026-xQz]" }
 $NewPassword = if ([string]::IsNullOrWhiteSpace($NewPasswordInput)) { 'Cyb3r-Pat!2026-xQz' } else { $NewPasswordInput }
 
-$RDPRequired = Confirm-Prompt "Is Remote Desktop (RDP) explicitly required by the README?" $false
-$IISRequired = Confirm-Prompt "Is Web Server (IIS) explicitly required by the README?" $false
-$FTPRequired = Confirm-Prompt "Is FTP Service explicitly required by the README?" $false
+if (-not $Force) {
+    $RDPRequired = Confirm-Prompt "Is Remote Desktop (RDP) explicitly required by the README?" $false
+    $IISRequired = Confirm-Prompt "Is Web Server (IIS) explicitly required by the README?" $false
+    $FTPRequired = Confirm-Prompt "Is FTP Service explicitly required by the README?" $false
+
+    $UsersToCreateInput = Read-Host "Enter Users/Groups to CREATE if missing (e.g., 'newuser1,newuser2')"
+    $UsersToCreate = @($UsersToCreateInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
+    $ProhibitedSoftInput = Read-Host "Enter PROHIBITED Software/Packages from README (comma-separated, e.g. 'Wireshark,Nmap')"
+    $ExtraProhibited = @($ProhibitedSoftInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
+    $script:FAST_MODE = Confirm-Prompt "Run in FAST MODE (Bulk silent remediation without per-item prompts)?" $true
+    $script:ALL_MODULES = Confirm-Prompt "Run ALL modules automatically without section prompts?" $false
+} else {
+    $RDPRequired = $false; $IISRequired = $false; $FTPRequired = $false
+    $script:FAST_MODE = $true; $script:ALL_MODULES = $true
+}
+
+# Display Summary
+Write-Host "`n====================================================" -ForegroundColor Green
+Write-Host "               STEP 0 SUMMARY REVIEW                " -ForegroundColor Green
+Write-Host "====================================================" -ForegroundColor Green
+Write-Host "Authorized Users     : $($AuthorizedUsers -join ', ')"
+Write-Host "Authorized Admins    : $($AuthorizedAdmins -join ', ')"
+Write-Host "Keep Services        : $($KeepServices -join ', ')"
+Write-Host "RDP Required         : $RDPRequired | IIS Required: $IISRequired | FTP Required: $FTPRequired"
+Write-Host "Run Mode             : FAST_MODE=$script:FAST_MODE | ALL_MODULES=$script:ALL_MODULES"
+Write-Host "====================================================" -ForegroundColor Green
+
+if (-not $Force) {
+    if (-not (Confirm-Prompt "Proceed with hardening using these parameters?")) {
+        Write-Host "Aborted by user." -ForegroundColor Red
+        exit
+    }
+}
+
+$builtin = @('Administrator','Guest','DefaultAccount','WDAGUtilityAccount')
+$current = $env:USERNAME
+$sec = ConvertTo-SecureString $NewPassword -AsPlainText -Force
 
 # ---------------------------------------------------------------------
 # 1. LOCAL USERS & GROUPS HARDENING
 # ---------------------------------------------------------------------
 Section "1. Local Users & Groups Hardening"
 
-$builtin = @('Administrator','Guest','DefaultAccount','WDAGUtilityAccount')
-$current = $env:USERNAME
-$sec = ConvertTo-SecureString $NewPassword -AsPlainText -Force
-
 if (Confirm-Prompt "Audit and remove unauthorized local users?") {
+    foreach ($nu in $UsersToCreate) {
+        if (-not (Get-LocalUser -Name $nu -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $nu -Password $sec -PasswordNeverExpires $false -ErrorAction SilentlyContinue | Out-Null
+            Add-LocalGroupMember -Group 'Users' -Member $nu -ErrorAction SilentlyContinue | Out-Null
+            Info "Created requested local user $nu"
+        }
+    }
+
     foreach ($u in Get-LocalUser) {
         if ($u.Name -in $builtin -or $u.Name -eq $current) { continue }
         if ($u.Name -notin $AuthorizedUsers -and $u.Name -notin $AuthorizedAdmins) {
-            if (Confirm-Prompt "Remove UNAUTHORIZED user '$($u.Name)'?") {
-                Remove-LocalUser -Name $u.Name
+            if ($script:FAST_MODE -or (Confirm-Prompt "Remove UNAUTHORIZED user '$($u.Name)'?")) {
+                Remove-LocalUser -Name $u.Name -ErrorAction SilentlyContinue
                 Info "Removed user $($u.Name)"
             }
         }
@@ -84,8 +184,8 @@ if (Confirm-Prompt "Enforce Administrators group membership?") {
         $n = $m.Name.Split('\')[-1]
         if ($n -in $builtin -or $n -eq $current) { continue }
         if ($n -notin $AuthorizedAdmins) {
-            if (Confirm-Prompt "Remove '$n' from Administrators?") {
-                Remove-LocalGroupMember -Group 'Administrators' -Member $m.Name
+            if ($script:FAST_MODE -or (Confirm-Prompt "Remove '$n' from Administrators?")) {
+                Remove-LocalGroupMember -Group 'Administrators' -Member $m.Name -ErrorAction SilentlyContinue
                 Info "Removed $n from Administrators group"
             }
         }
@@ -94,7 +194,7 @@ if (Confirm-Prompt "Enforce Administrators group membership?") {
         if (Get-LocalUser -Name $a -ErrorAction SilentlyContinue) {
             $isAdm = Get-LocalGroupMember -Group 'Administrators' -ErrorAction SilentlyContinue | Where-Object { $_.Name.Split('\')[-1] -eq $a }
             if (-not $isAdm) {
-                Add-LocalGroupMember -Group 'Administrators' -Member $a
+                Add-LocalGroupMember -Group 'Administrators' -Member $a -ErrorAction SilentlyContinue
                 Info "Added $a to Administrators group"
             }
         }
@@ -103,13 +203,13 @@ if (Confirm-Prompt "Enforce Administrators group membership?") {
 
 if (Confirm-Prompt "Reset password for all authorized local accounts to '$NewPassword'?") {
     foreach ($u in Get-LocalUser | Where-Object { $_.Enabled }) {
-        if ($u.Name -eq $current -or $u.Name -in $builtin) { continue }
         if ($u.Name -in $AuthorizedUsers -or $u.Name -in $AuthorizedAdmins) {
-            Set-LocalUser -Name $u.Name -Password $sec -PasswordNeverExpires $false
+            Set-LocalUser -Name $u.Name -Password $sec -PasswordNeverExpires $false -ErrorAction SilentlyContinue
             net user $u.Name /passwordreq:yes | Out-Null
             Info "Updated password and expiration for $($u.Name)"
         }
     }
+    Warn "Password reset applied to authorized accounts including current account. Use '$NewPassword' for subsequent logins."
 }
 
 foreach ($b in @('Guest','Administrator','DefaultAccount')) {
@@ -119,13 +219,14 @@ foreach ($b in @('Guest','Administrator','DefaultAccount')) {
 }
 
 # ---------------------------------------------------------------------
-# 2. LOCAL SECURITY & ACCOUNT POLICIES
+# 2. LOCAL SECURITY POLICY & USER RIGHTS ASSIGNMENT (SECEDIT SIDs)
 # ---------------------------------------------------------------------
-Section "2. Password, Lockout, and Local Security Policies"
+Section "2. Password, Lockout, and User Rights Assignment Policies"
 
-if (Confirm-Prompt "Apply password complexity, lockout threshold (10), and user rights policy?") {
+if (Confirm-Prompt "Apply password complexity, lockout threshold (10), and SID-based user rights assignment?") {
     net accounts /minpwlen:14 /minpwage:1 /maxpwage:90 /uniquepw:24 /lockoutthreshold:10 /lockoutduration:30 /lockoutwindow:30 | Out-Null
 
+    $rdpSID = if ($RDPRequired) { ",*S-1-5-32-555" } else { "" }
     $infPath = Join-Path $env:TEMP 'cp-secpol.inf'
     $sdb = Join-Path $env:TEMP 'cp-secpol.sdb'
     $infContent = @"
@@ -147,48 +248,113 @@ RequireLogonToChangePassword = 0
 ClearTextPassword = 0
 LSAAnonymousNameLookup = 0
 EnableGuestAccount = 0
+[Privilege Rights]
+SeTrustedCredManAccessPrivilege =
+SeNetworkLogonRight = *S-1-5-32-544$rdpSID
+SeTcbPrivilege =
+SeIncreaseQuotaPrivilege = *S-1-5-32-544,*S-1-5-19,*S-1-5-20
+SeInteractiveLogonRight = *S-1-5-32-544,*S-1-5-32-545
+SeRemoteInteractiveLogonRight = *S-1-5-32-544$rdpSID
+SeBackupPrivilege = *S-1-5-32-544
+SeSystemTimePrivilege = *S-1-5-32-544,*S-1-5-19
+SeTimeZonePrivilege = *S-1-5-32-544,*S-1-5-19
+SeCreateTokenPrivilege =
+SeCreateGlobalPrivilege = *S-1-5-32-544,*S-1-5-19,*S-1-5-20,*S-1-5-6
+SeCreatePermanentPrivilege =
+SeCreateSymbolicLinkPrivilege = *S-1-5-32-544
+SeDebugPrivilege = *S-1-5-32-544
+SeDenyNetworkLogonRight = *S-1-5-32-546
+SeDenyBatchLogonRight = *S-1-5-32-546
+SeDenyServiceLogonRight = *S-1-5-32-546
+SeDenyInteractiveLogonRight = *S-1-5-32-546
+SeDenyRemoteInteractiveLogonRight = *S-1-5-32-546
+SeRemoteShutdownPrivilege = *S-1-5-32-544
+SeAuditPrivilege = *S-1-5-19,*S-1-5-20
+SeImpersonatePrivilege = *S-1-5-32-544,*S-1-5-19,*S-1-5-20,*S-1-5-6
+SeLoadDriverPrivilege = *S-1-5-32-544
+SeSecurityPrivilege = *S-1-5-32-544
+SeShutdownPrivilege = *S-1-5-32-544,*S-1-5-32-545
+SeTakeOwnershipPrivilege = *S-1-5-32-544
 "@
     $infContent | Out-File -FilePath $infPath -Encoding unicode -Force
-    secedit /configure /db $sdb /cfg $infPath /areas SECURITYPOLICY /quiet | Out-Null
-    Info "Secedit local security policy applied"
+    secedit /configure /db $sdb /cfg $infPath /areas SECURITYPOLICY USER_RIGHTS /quiet | Out-Null
+    Info "Secedit local security policy and user rights assignments applied"
 }
 
 # ---------------------------------------------------------------------
-# 3. AUDIT POLICY & REGISTRY SECURITY OPTIONS
+# 3. AUDIT POLICY & SECURITY REGISTRY OPTIONS
 # ---------------------------------------------------------------------
-Section "3. Audit Policy & Security Options"
+Section "3. Audit Policy & Security Registry Options"
 
-if (Confirm-Prompt "Enable full audit logging (Auditpol success + failure)?") {
+if (Confirm-Prompt "Enable full audit logging across all subcategories?") {
     auditpol /set /category:* /success:enable /failure:enable | Out-Null
+    Set-RegProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'SCENoApplyLegacyAuditPolicy' 1
     Info "Enabled full auditpol logging"
 }
 
-if (Confirm-Prompt "Apply security registry options (UAC max, SmartScreen, LSA, SMBGhost, CAD)?") {
+if (Confirm-Prompt "Apply security registry options (UAC max, SmartScreen, LSA, CAD, WDigest, SMBGhost)?") {
     $lsa = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
     $sys = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
     $lsv = 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters'
+    $lws = 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters'
+    $wl  = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
 
     Set-RegProperty $lsa 'LimitBlankPasswordUse' 1
     Set-RegProperty $lsa 'restrictanonymous' 1
     Set-RegProperty $lsa 'restrictanonymoussam' 1
     Set-RegProperty $lsa 'everyoneincludesanonymous' 0
     Set-RegProperty $lsa 'NoLMHash' 1
+    Set-RegProperty $lsa 'LmCompatibilityLevel' 5
+    Set-RegProperty $lsa 'disabledomaincreds' 1
+    Set-RegProperty $lsa 'RunAsPPL' 1
 
     # UAC max
     Set-RegProperty $sys 'EnableLUA' 1
     Set-RegProperty $sys 'ConsentPromptBehaviorAdmin' 2
     Set-RegProperty $sys 'ConsentPromptBehaviorUser' 0
     Set-RegProperty $sys 'PromptOnSecureDesktop' 1
+    Set-RegProperty $sys 'DontDisplayLastUserName' 1
+    Set-RegProperty $sys 'DisableCAD' 0
+    Set-RegProperty $sys 'InactivityTimeoutSecs' 900
 
-    # Disable AutoRun
+    # AutoRun & SmartScreen
     Set-RegProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer' 'NoDriveTypeAutoRun' 255
     Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'EnableSmartScreen' 1
+
+    # Printer Driver Installation
+    Set-RegProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Providers\LanMan Print Services\Servers' 'AddPrinterDrivers' 1
+
+    # Winlogon / Recovery Console
+    Set-RegProperty $wl 'AutoAdminLogon' '0' 'String'
+    Set-RegProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Setup\RecoveryConsole' 'SecurityLevel' 0
+    Set-RegProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Setup\RecoveryConsole' 'SetCommand' 0
+
+    # Screen Saver
+    Set-RegProperty 'HKCU:\Control Panel\Desktop' 'ScreenSaveActive' '1' 'String'
+    Set-RegProperty 'HKCU:\Control Panel\Desktop' 'ScreenSaveTimeOut' '600' 'String'
+    Set-RegProperty 'HKCU:\Control Panel\Desktop' 'ScreenSaverIsSecure' '1' 'String'
 
     # SMB Hardening
     Set-RegProperty $lsv 'AutoDisconnect' 15
     Set-RegProperty $lsv 'RequireSecuritySignature' 1
     Set-RegProperty $lsv 'EnableSecuritySignature' 1
     Set-RegProperty $lsv 'DisableCompression' 1
+    Set-RegProperty $lws 'RequireSecuritySignature' 1
+    Set-RegProperty $lws 'EnableSecuritySignature' 1
+    Set-RegProperty $lws 'EnablePlainTextPassword' 0
+
+    # WDigest, Wi-Fi Sense & Remote Assistance
+    Set-RegProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest' 'UseLogonCredential' 0
+    Set-RegProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' 'fAllowToGetHelp' 0
+    Set-RegProperty 'HKLM:\SOFTWARE\Microsoft\WcmSvc\wifinetworkmanager\config' 'AutoConnectAllowedOEM' 0
+
+    # UPnP & NetBIOS / LLMNR
+    Set-RegProperty 'HKLM:\SOFTWARE\Microsoft\DirectplayNATHelp\DPNHUPnP' 'UPnPMode' 2
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' 'EnableMulticast' 0
+
+    # PowerShell Logging
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging' 'EnableScriptBlockLogging' 1
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging' 'EnableModuleLogging' 1
 }
 
 # ---------------------------------------------------------------------
@@ -220,24 +386,101 @@ if ($RDPRequired) {
 # ---------------------------------------------------------------------
 Section "5. Windows Defender & Firewall Settings"
 
-if (Confirm-Prompt "Enable Windows Defender Real-Time Protection and firewall?") {
+if (Confirm-Prompt "Enable Windows Defender Real-Time Protection, Firewall, and clear exclusions?") {
     Set-MpPreference -DisableRealtimeMonitoring $false -DisableBehaviorMonitoring $false -DisableIOAVProtection $false -PUAProtection Enabled -ErrorAction SilentlyContinue
     Set-Service WinDefend -StartupType Automatic -ErrorAction SilentlyContinue
     Start-Service WinDefend -ErrorAction SilentlyContinue
 
+    # Clear Defender exclusions
+    $mp = Get-MpPreference -ErrorAction SilentlyContinue
+    if ($mp) {
+        foreach ($p in @($mp.ExclusionPath)) { if ($p) { Remove-MpPreference -ExclusionPath $p -ErrorAction SilentlyContinue } }
+        foreach ($p in @($mp.ExclusionExtension)) { if ($p) { Remove-MpPreference -ExclusionExtension $p -ErrorAction SilentlyContinue } }
+        foreach ($p in @($mp.ExclusionProcess)) { if ($p) { Remove-MpPreference -ExclusionProcess $p -ErrorAction SilentlyContinue } }
+    }
+
     Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True -DefaultInboundAction Block -DefaultOutboundAction Allow
     Set-Service mpssvc -StartupType Automatic -ErrorAction SilentlyContinue
     Start-Service mpssvc -ErrorAction SilentlyContinue
-    Info "Windows Defender and Firewall enabled"
+
+    # Prune non-required inbound rules
+    Get-NetFirewallRule -Direction Inbound -Enabled True -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -match 'Microsoft Edge|Search|MSN|Money|Sports|News|Weather|Photos|Xbox' } |
+        Disable-NetFirewallRule -ErrorAction SilentlyContinue
+
+    Info "Windows Defender exclusions cleared and Firewall enabled"
 }
 
 # ---------------------------------------------------------------------
-# 6. SERVICES & FEATURES
+# 6. PERSISTENCE SWEEP (IFEO, WMI, Tasks, Run Keys, Hosts File, NetBIOS)
 # ---------------------------------------------------------------------
-Section "6. Services & Optional Features"
+Section "6. Persistence Sweep (IFEO, WMI, Scheduled Tasks, Run Keys, Hosts)"
 
-if (Confirm-Prompt "Disable unauthorized services (Telnet, FTP, IIS, SNMP, UPnP)?") {
-    $svcDisable = @('FTPSVC','MSFTPSVC','W3SVC','WMSvc','TlntSvr','SNMP','SNMPTRAP','RIPListener','upnphost','SSDPSRV','RemoteRegistry','NfsClnt')
+if (Confirm-Prompt "Sweep IFEO debugger hijacks, WMI subscriptions, Scheduled Tasks, Run keys, and Hosts file?") {
+    # IFEO Debugger Hijacks
+    foreach ($base in 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows NT\CurrentVersion\Image File Execution Options') {
+        Get-ChildItem $base -ErrorAction SilentlyContinue | ForEach-Object {
+            $d = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).Debugger
+            if ($d -and $d -match 'cmd\.exe|powershell|nc\.exe') {
+                Remove-ItemProperty $_.PSPath -Name Debugger -ErrorAction SilentlyContinue
+                Info "Cleaned IFEO debugger hijack on $($_.PSChildName)"
+            }
+        }
+    }
+
+    # WMI Event Subscriptions
+    foreach ($cls in '__EventFilter','CommandLineEventConsumer','ActiveScriptEventConsumer','__FilterToConsumerBinding') {
+        Get-CimInstance -Namespace root\subscription -ClassName $cls -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($_.Name -notmatch '^SCM Event Log') {
+                Remove-CimInstance -InputObject $_ -ErrorAction SilentlyContinue
+                Info "Removed WMI subscription $($_.Name)"
+            }
+        }
+    }
+
+    # Non-Microsoft Scheduled Tasks
+    Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskPath -notmatch '\\Microsoft\\' } | ForEach-Object {
+        if ($script:FAST_MODE -or (Confirm-Timed "Unregister non-Microsoft Scheduled Task '$($_.TaskName)'?")) {
+            Unregister-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath -Confirm:$false -ErrorAction SilentlyContinue
+            Info "Unregistered task $($_.TaskName)"
+        }
+    }
+
+    # Run / RunOnce Keys
+    foreach ($rk in 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run','HKCU:\Software\Microsoft\Windows\CurrentVersion\Run','HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce') {
+        $props = Get-ItemProperty $rk -ErrorAction SilentlyContinue
+        if ($props) {
+            foreach ($p in $props.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' }) {
+                if ($p.Value -match '\\Users\\|\\Temp\\|AppData|\.vbs|\.bat|\.ps1|cmd\.exe|powershell|nc\.exe') {
+                    Remove-ItemProperty -Path $rk -Name $p.Name -ErrorAction SilentlyContinue
+                    Info "Removed startup run entry $($p.Name)"
+                }
+            }
+        }
+    }
+
+    # Hosts File Cleanup
+    $hostsPath = "$env:SystemRoot\System32\drivers\etc\hosts"
+    $hostsContent = Get-Content $hostsPath -ErrorAction SilentlyContinue
+    $cleanHosts = $hostsContent | Where-Object { $_ -match '^\s*#' -or $_ -match '^\s*(127\.0\.0\.1|::1)\s+localhost\s*$' -or [string]::IsNullOrWhiteSpace($_) }
+    $cleanHosts | Set-Content $hostsPath -Force -ErrorAction SilentlyContinue
+    Info "Cleaned hosts file to localhost defaults"
+
+    # Disable NetBIOS over TCP/IP & DNS Registration
+    Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Services\NetBT\Parameters\Interfaces' -ErrorAction SilentlyContinue | ForEach-Object {
+        Set-ItemProperty -Path $_.PSPath -Name 'NetbiosOptions' -Value 2 -ErrorAction SilentlyContinue
+    }
+    Set-DnsClient -InterfaceAlias '*' -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue
+    Info "Disabled NetBIOS over TCP/IP and DNS adapter registration"
+}
+
+# ---------------------------------------------------------------------
+# 7. SERVICES, FEATURES & SHARES
+# ---------------------------------------------------------------------
+Section "7. Services, Optional Features & Shares"
+
+if (Confirm-Prompt "Disable unauthorized services and optional features?") {
+    $svcDisable = @('FTPSVC','MSFTPSVC','W3SVC','WMSvc','TlntSvr','SNMP','SNMPTRAP','RIPListener','upnphost','SSDPSRV','RemoteRegistry','NfsClnt','SMTPSVC')
     if ($IISRequired) { $svcDisable = $svcDisable | Where-Object { $_ -notin 'W3SVC','WMSvc' } }
     if ($FTPRequired) { $svcDisable = $svcDisable | Where-Object { $_ -notin 'FTPSVC','MSFTPSVC' } }
 
@@ -249,45 +492,150 @@ if (Confirm-Prompt "Disable unauthorized services (Telnet, FTP, IIS, SNMP, UPnP)
             Info "Disabled service $s"
         }
     }
-}
 
-if (Confirm-Prompt "Disable SMBv1 protocol?") {
-    Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force -Confirm:$false -ErrorAction SilentlyContinue
-    Set-RegProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\mrxsmb10' 'Start' 4
-    Info "SMBv1 disabled"
-}
+    Set-Service Wecsvc -StartupType Automatic -ErrorAction SilentlyContinue
+    Start-Service Wecsvc -ErrorAction SilentlyContinue
 
-# ---------------------------------------------------------------------
-# 7. PROHIBITED SOFTWARE, PROCESSES & MEDIA FILES
-# ---------------------------------------------------------------------
-Section "7. Prohibited Software, Backdoors & Media Files"
-
-if (Confirm-Prompt "Sweep and kill netcat/backdoor processes?") {
-    $badProcs = @('GooseDesktop','nc','ncat','netcat')
-    foreach ($p in Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -in $badProcs }) {
-        Stop-Process -Id $p.Id -Force
-        Info "Killed backdoor process $($p.Name)"
+    # Optional Features
+    $optFeatures = @('TelnetClient','TelnetServer','SimpleTCP','SMB1Protocol','ServicesForNFS-ClientOnly')
+    if (-not $FTPRequired) { $optFeatures += 'TFTP' }
+    if (-not $IISRequired) { $optFeatures += 'IIS-WebServerRole' }
+    foreach ($f in $optFeatures) {
+        Disable-WindowsOptionalFeature -Online -FeatureName $f -NoRestart -ErrorAction SilentlyContinue | Out-Null
     }
 }
 
-if (Confirm-Prompt "Scan and delete prohibited MP3 and media files under C:\Users?") {
-    Get-ChildItem -Path "$env:SystemDrive\Users" -Recurse -Force -Include '*.mp3','*.mp4','*.avi','*.mkv' -ErrorAction SilentlyContinue | ForEach-Object {
+if (Confirm-Prompt "Disable SMBv1 and prune non-standard SMB shares?") {
+    Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force -Confirm:$false -ErrorAction SilentlyContinue
+    Set-RegProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\mrxsmb10' 'Start' 4
+
+    $okShares = @('ADMIN$','C$','IPC$')
+    foreach ($sh in Get-SmbShare -ErrorAction SilentlyContinue) {
+        if ($sh.Name -notin $okShares) {
+            if ($script:FAST_MODE -or (Confirm-Prompt "Remove SMB Share '$($sh.Name)'?")) {
+                Remove-SmbShare -Name $sh.Name -Force -ErrorAction SilentlyContinue
+                Info "Removed share $($sh.Name)"
+            }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------
+# 8. PROHIBITED SOFTWARE, BACKDOORS & MEDIA FILES
+# ---------------------------------------------------------------------
+Section "8. Prohibited Software, Backdoor Processes & Media Files"
+
+if (Confirm-Prompt "Kill netcat/backdoors, uninstall prohibited software, and delete MP3/media?") {
+    $badProcs = @('GooseDesktop','nc','ncat','netcat')
+    foreach ($p in Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -in $badProcs }) {
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        Info "Killed backdoor process $($p.Name)"
+    }
+
+    $ncHits = Get-ChildItem -Path "$env:SystemDrive\" -Recurse -Force -Include 'nc.exe','ncat.exe','netcat.exe' -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch '\\Windows\\WinSxS' }
+    foreach ($f in $ncHits) {
+        Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue
+        Info "Deleted netcat binary $($f.FullName)"
+    }
+
+    # Prohibited Software Uninstall
+    $prohibitedList = @('GooseDesktop','CCleaner','WebCompanion','OpenTFTPServer','Nmap','Zenmap','Wireshark','uTorrent','BitTorrent') + $ExtraProhibited
+    $uninstKeys = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    Get-ItemProperty $uninstKeys -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName } | ForEach-Object {
+        $app = $_
+        foreach ($p in $prohibitedList) {
+            if ($app.DisplayName -match $p) {
+                if ($script:FAST_MODE -or (Confirm-Prompt "Uninstall prohibited software '$($app.DisplayName)'?")) {
+                    $cmd = if ($app.QuietUninstallString) { $app.QuietUninstallString } else { $app.UninstallString }
+                    if ($cmd -match 'msiexec') { $cmd = ($cmd -replace '/I','/X') + ' /qn /norestart' }
+                    Start-Process cmd.exe -ArgumentList "/c $cmd" -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue
+                    Info "Uninstalled $($app.DisplayName)"
+                }
+            }
+        }
+    }
+
+    # Media File Deletion
+    Get-ChildItem -Path "$env:SystemDrive\Users" -Recurse -Force -Include '*.mp3','*.mp4','*.avi','*.mkv','*.flac','*.wav','*.mov','*.wmv' -ErrorAction SilentlyContinue | ForEach-Object {
         Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
         Info "Deleted media file: $($_.FullName)"
     }
 }
 
 # ---------------------------------------------------------------------
-# 8. AUTOMATIC UPDATES
+# 9. AUTOMATIC UPDATES, BROWSER POLICIES & WINGET/CHOCO
 # ---------------------------------------------------------------------
-Section "8. Windows Update Policy"
+Section "9. Windows Update, Browser Policies & Package Managers"
 
-if (Confirm-Prompt "Configure automatic Windows Updates?") {
+if (Confirm-Prompt "Configure automatic Windows Updates, Browser Policies, and run Package Upgrades?") {
     Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'NoAutoUpdate' 0
     Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'AUOptions' 4
-    Info "Automatic Windows Updates enabled"
+
+    # Edge / Chrome Registry Policies
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' 'SmartScreenEnabled' 1
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' 'DefaultPopupsSetting' 2
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Google\Chrome' 'SafeBrowsingProtectionLevel' 1
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Google\Chrome' 'DefaultPopupsSetting' 2
+
+    # Firefox user.js Hardening
+    $ffPrefs = @"
+user_pref("privacy.donottrackheader.enabled", true);
+user_pref("browser.safebrowsing.malware.enabled", true);
+user_pref("browser.safebrowsing.phishing.enabled", true);
+user_pref("dom.security.https_only_mode", true);
+user_pref("browser.contentblocking.category", "strict");
+"@
+    Get-ChildItem "env:SystemDrive\Users\*\AppData\Roaming\Mozilla\Firefox\Profiles\*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        Set-Content -Path (Join-Path $_.FullName 'user.js') -Value $ffPrefs -Force -ErrorAction SilentlyContinue
+    }
+
+    # Attempt winget / choco upgrades
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        winget upgrade --all --silent --accept-source-agreements --accept-package-agreements --include-unknown -ErrorAction SilentlyContinue
+    } elseif (Get-Command choco -ErrorAction SilentlyContinue) {
+        choco upgrade all -y -ErrorAction SilentlyContinue
+    }
+
+    # Trigger Windows Update
+    UsoClient StartScan -ErrorAction SilentlyContinue
+    Info "Automatic Windows Updates and Browser Policies configured"
 }
+
+# ---------------------------------------------------------------------
+# 10. AUTOMATIC HEALTH CHECK
+# ---------------------------------------------------------------------
+Section "10. Automatic Health Check"
+
+function Check-Health($name, $condition) {
+    if ($condition) { Write-Host "  [ PASS ] $name" -ForegroundColor Green; Info "HEALTH PASS: $name" }
+    else { Write-Host "  [ FAIL ] $name" -ForegroundColor Red; Warn "HEALTH FAIL: $name" }
+}
+
+Check-Health "Windows Firewall Service Running" ((Get-Service mpssvc).Status -eq 'Running')
+Check-Health "Windows Defender Service Running" ((Get-Service WinDefend).Status -eq 'Running')
+
+if ($RDPRequired) {
+    Check-Health "RDP Listening Port 3389" ((Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue) -ne $null)
+}
+
+# ---------------------------------------------------------------------
+# 11. FINAL VERIFICATION REPORT
+# ---------------------------------------------------------------------
+Section "11. Final Verification Report"
+
+Write-Host "Local Administrators : $((Get-LocalGroupMember -Group 'Administrators' -ErrorAction SilentlyContinue).Name -join ', ')"
+Write-Host "Active SMB Shares    : $((Get-SmbShare -ErrorAction SilentlyContinue).Name -join ', ')"
+Write-Host "Firewall Profiles    : Domain=$(Get-NetFirewallProfile -Profile Domain).Enabled, Public=$(Get-NetFirewallProfile -Profile Public).Enabled, Private=$(Get-NetFirewallProfile -Profile Private).Enabled"
 
 Write-Host "`n====================================================" -ForegroundColor Green
 Write-Host "   Windows SuperScript Hardening Completed!         " -ForegroundColor Green
 Write-Host "====================================================" -ForegroundColor Green
+Write-Host "Summary log written to: $SummaryFile" -ForegroundColor Cyan
+Write-Host "Log file written to    : $LogFile" -ForegroundColor Cyan
+
+if (-not $Force) {
+    if (Confirm-Prompt "Open the change summary log file now?") {
+        Get-Content $SummaryFile
+    }
+}
