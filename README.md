@@ -1,6 +1,6 @@
 # CyberPatriot Round-Ready SuperScripts
 
-This repository contains four specialized, interactive CyberPatriot hardening scripts designed to get 85–100 points quickly in competition rounds across Ubuntu, Linux Mint, Windows 10/11 Workstations, and Windows Server environments.
+This repository contains four specialized, interactive CyberPatriot hardening scripts designed to obtain 85–100 points quickly in competition rounds across Ubuntu, Linux Mint, Windows 10/11 Workstations, and Windows Server environments.
 
 ---
 
@@ -15,7 +15,7 @@ This repository contains four specialized, interactive CyberPatriot hardening sc
 
 ---
 
-## How to Run in a Competition Round
+## How to Run in a Competition Round (In-Depth Guide)
 
 ### 1. Pre-Run Prerequisites (First 2 Minutes of the Round)
 1. **Read the Competition README:** Open and read the image's README carefully before running any scripts.
@@ -29,43 +29,101 @@ This repository contains four specialized, interactive CyberPatriot hardening sc
 
 ---
 
-### 2. Running Linux Scripts (`UbuntuSuperScript` / `MintSuperScript`)
+### 2. Method 1: Running Saved Script Files (Recommended Method)
 
-1. Open a terminal on the image.
-2. Grant execution permissions:
+Running the scripts from a saved file on the machine is the **most reliable and recommended approach** for competition rounds. Virtual Machine clipboard buffers can drop characters when pasting large scripts, whereas running saved files avoids buffer limits and input stream errors.
+
+#### **A. Linux Systems (`UbuntuSuperScript` / `MintSuperScript`)**
+
+1. **Get the script file onto the machine:**
+   - **Option A (Download via `wget`/`curl`):** If you host your script on a repository or web server:
+     ```bash
+     wget https://your-domain.com/UbuntuSuperScript -O UbuntuSuperScript
+     ```
+   - **Option B (Create via text editor):** Create a new file on Desktop/Home directory:
+     ```bash
+     nano UbuntuSuperScript
+     ```
+     Paste the script contents into `nano`, press `Ctrl + O` then `Enter` to save, and `Ctrl + X` to exit.
+
+2. **Make the script executable:**
    ```bash
    chmod +x UbuntuSuperScript
    # OR for Mint:
    chmod +x MintSuperScript
    ```
-3. Run the script with root privileges:
+
+3. **Run the script with `sudo` privileges:**
    ```bash
    sudo ./UbuntuSuperScript
    # OR for Mint:
    sudo ./MintSuperScript
    ```
-4. **Interactive Prompts:**
-   - **Step 0 (README Details):** Enter space-separated lists when prompted for Authorized Users, Authorized Administrators, Services to Keep, Firewall Ports to Allow, and default password.
+
+4. **Respond to Interactive Prompts:**
+   - **Step 0 (README Specifics):** Enter space-separated lists for Authorized Users, Authorized Administrators, Services to Keep, Firewall Ports to Allow, and Default Password.
    - **Hardening Steps:** Answer `Y` or `N` to confirm each aggressive hardening section (User deletion, Password reset, PAM policy, Sysctl rules, SSH hardening, Package/Service purging, Backdoor removal, Media file cleanup, UFW Firewall, and System updates).
 
 ---
 
-### 3. Running Windows Scripts (`WindowsSuperScript` / `WindowsServerSuperScript`)
+#### **B. Windows Systems (`WindowsSuperScript` / `WindowsServerSuperScript`)**
 
-1. Open **PowerShell as Administrator** (Right-click PowerShell -> *Run as administrator*).
-2. Set execution policy for the current session:
+1. **Get the script file onto the machine:**
+   - **Option A (Create via Notepad):** Open Notepad (`notepad.exe`), paste the script content, and save it as `C:\WindowsSuperScript.ps1` (ensure "Save as type" is set to "All Files").
+   - **Option B (Download via PowerShell):**
+     ```powershell
+     Invoke-WebRequest -Uri "https://your-domain.com/WindowsSuperScript.ps1" -OutFile "C:\WindowsSuperScript.ps1"
+     ```
+
+2. **Open PowerShell as Administrator:**
+   - Click the Start Menu, type `powershell`, right-click **Windows PowerShell**, and select **Run as administrator**.
+
+3. **Bypass Execution Policy for the session:**
    ```powershell
    Set-ExecutionPolicy -Scope Process Bypass -Force
    ```
-3. Execute the script:
+
+4. **Execute the script:**
    ```powershell
+   cd C:\
    .\WindowsSuperScript.ps1
    # OR for Windows Server / Domain Controller:
    .\WindowsServerSuperScript.ps1
    ```
-4. **Interactive Prompts:**
-   - **Step 0 (README Details):** Enter comma-separated lists for Authorized Users, Authorized Admins, Required Services to Keep, Default Password, and confirm if RDP/IIS/FTP are required.
+
+5. **Respond to Interactive Prompts:**
+   - **Step 0 (README Specifics):** Enter comma-separated lists for Authorized Users, Authorized Admins, Required Services to Keep, Default Password, and confirm if RDP/IIS/FTP are required.
    - **Hardening Steps:** Answer `Y` or `N` to confirm each aggressive hardening section (User/Admin cleanup, Password/Account lockout policy, Full Auditpol logging, UAC/LSA/SMBGhost registry options, Defender & Firewall activation, Service/SMBv1 disabling, Backdoor process termination, MP3/Media file deletion, and Automatic Windows Update policy).
+
+---
+
+### 3. Method 2: Direct Terminal Pasting & One-Liners
+
+If you cannot easily save a file onto the image, you can run the scripts using the following direct paste and streaming methods:
+
+#### **Linux Direct Execution One-Liner (Web Stream):**
+If your script is hosted online, you can stream it directly into Bash without saving it first:
+```bash
+sudo bash <(curl -sSL https://your-domain.com/UbuntuSuperScript)
+```
+*Note: Because our Linux scripts explicitly read keyboard inputs from `</dev/tty`, interactive prompts like `read` will still pause and correctly wait for your physical keyboard inputs even when streamed over `curl`.*
+
+#### **Linux Here-Doc Pasting:**
+To avoid Virtual Machine clipboard buffer issues while pasting, wrap the paste inside a `cat` Here-Doc in the terminal:
+```bash
+cat << 'EOF' > run.sh
+# [Paste full script code here]
+EOF
+chmod +x run.sh
+sudo ./run.sh
+```
+
+#### **Windows One-Liner Execution:**
+In an Administrator PowerShell window:
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass -Force
+IEX (New-Object Net.WebClient).DownloadString('https://your-domain.com/WindowsSuperScript.ps1')
+```
 
 ---
 
@@ -77,7 +135,7 @@ This repository contains four specialized, interactive CyberPatriot hardening sc
 - **Network Kernel Hardening (`sysctl`):** Disables IP forwarding, ICMP redirects, and source routing; enables TCP SYN cookies (`net.ipv4.tcp_syncookies = 1`) and martian logging.
 - **File & System Permissions:** Restricts permissions on `/etc/shadow`, `/etc/gshadow`, `/etc/passwd`, `/etc/group`, and `/etc/sudoers`.
 - **SSH Hardening:** Disables root SSH login (`PermitRootLogin no`), empty passwords, and X11 forwarding.
-- **Service & Package Purging:** Disables and purges prohibited hacking tools (`nmap`, `netcat`, `wireshark`, `john`, `hydra`, `aircrack-ng`, etc.) and unauthorized server packages (`nginx`, `vsftpd`, `telnetd`, `smbd`, `snmpd`, `cups`, `avahi`).
+- **Service & Package Purging:** Disables and purges prohibited hacking tools (`nmap`, `netcat`, `wireshark`, `john`, `hydra`, `aircrack-ng`, etc.) and unauthorized server packages (`nginx`, `vsftpd`, `telnetd`, `samba`, `snmpd`, `cups`, `avahi`).
 - **Backdoor & Persistence Cleanup:** Kills running netcat/socat processes, deletes netcat binaries, and restricts cron/at to `root`.
 - **Media Cleanup:** Deletes prohibited `.mp3`, `.mp4`, `.avi`, `.mkv`, `.mov`, and `.flac` files in home and temp directories.
 - **Host Firewall (UFW):** Sets default-deny incoming and default-allow outgoing policies; allows SSH and user-specified ports.
