@@ -17,17 +17,17 @@ This repository contains four specialized, interactive CyberPatriot hardening sc
 
 ## CyberPatriot Practice Images & Training Resources
 
-Practice on virtual machines using snapshots before competing! Use these official and community resources to download CyberPatriot practice images:
+Practice on virtual machines using snapshots before competing! Use these verified resources to access CyberPatriot training materials and practice images:
 
-1. **Official US CyberPatriot Training Materials & Practice Images:**
-   - [US CyberPatriot Official Training Materials](https://www.uscyberpatriot.org/competition/training-materials)
-   - [Official Linux Training Page](https://www.uscyberpatriot.org/competition/training-materials/linux)
-   - [Official Windows Training Page](https://www.uscyberpatriot.org/competition/training-materials/windows)
+1. **Official US CyberPatriot Competition Portal:**
+   - [Official US CyberPatriot Training Materials](https://www.uscyberpatriot.org/competition/training-materials)
+   - [Official Competition Overview & Rules](https://www.uscyberpatriot.org/competition/Competition-Overview/competition-overview)
+   - [Official Competition Schedule & Rounds](https://www.uscyberpatriot.org/competition/current-competition/competition-schedule)
 
-2. **Community Practice Images & Repositories:**
-   - [CyberPanther Practice Images Archive](https://github.com/CyberPanthers)
-   - [CyberPatriot Practice Image Catalog (CyberPatriot Wiki)](https://github-wiki-see.page/m/Wes-Bl/Cyberpatriot-Wiki/wiki)
-   - [LinuxVox CyberPatriot Guide & Exercises](https://linuxvox.com/blog/cyberpatriot-linux-checklist/)
+2. **Community Practice Images & Hardening Guides:**
+   - [CyberPatriot Community Wiki & Checklist Repository](https://github-wiki-see.page/m/Wes-Bl/Cyberpatriot-Wiki/wiki)
+   - [LinuxVox CyberPatriot Linux Checklist & Exercises](https://linuxvox.com/blog/cyberpatriot-linux-checklist/)
+   - [Official Ubuntu Security Documentation](https://ubuntu.com/server/docs/how-to/security/)
 
 ---
 
