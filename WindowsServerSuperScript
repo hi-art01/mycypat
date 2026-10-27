@@ -74,7 +74,8 @@ function Set-RegMultiEmpty {
     param([string]$RegPath, [string]$Name)
     try {
         reg add $RegPath /v $Name /t REG_MULTI_SZ /d "" /f | Out-Null
-        Info "$RegPath\$Name = (blank)"
+        if ($LASTEXITCODE -ne 0) { Warn "reg add failed on $RegPath\$Name (ExitCode: $LASTEXITCODE)" }
+        else { Info "$RegPath\$Name = (blank)" }
     } catch { Warn "Failed MultiEmpty $RegPath\$Name" }
 }
 
@@ -177,6 +178,13 @@ $builtin = @('Administrator','Guest','krbtgt','DefaultAccount','WDAGUtilityAccou
 $current = $env:USERNAME
 $sec = ConvertTo-SecureString $NewPassword -AsPlainText -Force
 
+# Dynamically resolve WdiServiceHost SID
+$wdiSID = "*S-1-5-80-3139157870-2983391045-3678747466-658725712-1809340420"
+try {
+    $sidMatch = (sc.exe showsid 'WdiServiceHost' | Select-String 'S-1-5-[0-9\-]+')
+    if ($sidMatch) { $wdiSID = "*$($sidMatch.Matches[0].Value)" }
+} catch {}
+
 # ---------------------------------------------------------------------
 # 1. ACCOUNTS & PRIVILEGES (LOCAL OR AD)
 # ---------------------------------------------------------------------
@@ -217,7 +225,7 @@ if ($IsDomainController -and (Get-Module -ListAvailable ActiveDirectory)) {
         }
     }
 
-    if (Confirm-Prompt "Reset password for all authorized AD domain accounts to '$NewPassword'?") {
+    if (Confirm-Prompt "Reset password for all authorized AD domain accounts?") {
         foreach ($u in Get-ADUser -Filter * | Where-Object { $_.Enabled }) {
             $sam = $u.SamAccountName
             if ($sam -eq $current -or $sam -in $builtin) { continue }
@@ -227,7 +235,7 @@ if ($IsDomainController -and (Get-Module -ListAvailable ActiveDirectory)) {
                 Info "Updated password and expiration for AD account $sam"
             }
         }
-        Warn "Password reset applied to authorized AD domain accounts. Use '$NewPassword' for subsequent logins."
+        Write-Host "[!] Password reset applied to authorized AD domain accounts. Default password set." -ForegroundColor Yellow
     }
 } else {
     # Non-DC Server
@@ -243,7 +251,7 @@ if ($IsDomainController -and (Get-Module -ListAvailable ActiveDirectory)) {
         }
     }
 
-    if (Confirm-Prompt "Reset password for all authorized local accounts to '$NewPassword'?") {
+    if (Confirm-Prompt "Reset password for all authorized local accounts?") {
         foreach ($u in Get-LocalUser | Where-Object { $_.Enabled }) {
             if ($u.Name -in $AuthorizedUsers -or $u.Name -in $AuthorizedAdmins) {
                 Set-LocalUser -Name $u.Name -Password $sec -PasswordNeverExpires $false -ErrorAction SilentlyContinue
@@ -251,7 +259,7 @@ if ($IsDomainController -and (Get-Module -ListAvailable ActiveDirectory)) {
                 Info "Updated password and expiration for $($u.Name)"
             }
         }
-        Warn "Password reset applied to authorized local accounts. Use '$NewPassword' for subsequent logins."
+        Write-Host "[!] Password reset applied to authorized local accounts. Default password set." -ForegroundColor Yellow
     }
 }
 
@@ -265,11 +273,11 @@ if (Confirm-Prompt "Apply password complexity, lockout threshold (10), and SID-b
 
     $infPath = Join-Path $env:TEMP 'cp-secpol.inf'
     $sdb = Join-Path $env:TEMP 'cp-secpol.sdb'
-    $infContent = @'
+    $infContent = @"
 [Unicode]
 Unicode=yes
 [Version]
-signature="$CHICAGO$"
+signature="`$CHICAGO`$"
 Revision=1
 [System Access]
 MinimumPasswordAge = 1
@@ -307,11 +315,20 @@ SeDenyRemoteInteractiveLogonRight = *S-1-5-32-546
 SeRemoteShutdownPrivilege = *S-1-5-32-544
 SeAuditPrivilege = *S-1-5-19,*S-1-5-20
 SeImpersonatePrivilege = *S-1-5-32-544,*S-1-5-19,*S-1-5-20,*S-1-5-6
+SeIncreaseBasePriorityPrivilege = *S-1-5-32-544
 SeLoadDriverPrivilege = *S-1-5-32-544
 SeSecurityPrivilege = *S-1-5-32-544
+SeBatchLogonRight = *S-1-5-32-544
+SeServiceLogonRight =
+SeSystemEnvironmentPrivilege = *S-1-5-32-544
+SeManageVolumePrivilege = *S-1-5-32-544
+SeProfileSingleProcessPrivilege = *S-1-5-32-544
+SeSystemProfilePrivilege = *S-1-5-32-544,$wdiSID
+SeAssignPrimaryTokenPrivilege = *S-1-5-19,*S-1-5-20
+SeRestorePrivilege = *S-1-5-32-544
 SeShutdownPrivilege = *S-1-5-32-544,*S-1-5-32-545
 SeTakeOwnershipPrivilege = *S-1-5-32-544
-'@
+"@
 
     if ($RDPRequired) {
         $infContent = $infContent -replace 'SeNetworkLogonRight = \*S-1-5-32-544', 'SeNetworkLogonRight = *S-1-5-32-544,*S-1-5-32-555'
@@ -320,7 +337,8 @@ SeTakeOwnershipPrivilege = *S-1-5-32-544
 
     $infContent | Out-File -FilePath $infPath -Encoding unicode -Force
     secedit /configure /db $sdb /cfg $infPath /areas SECURITYPOLICY USER_RIGHTS /quiet | Out-Null
-    Info "Secedit local security policy and user rights assignments applied"
+    if ($LASTEXITCODE -ne 0) { Warn "Secedit configuration completed with status code $LASTEXITCODE" }
+    else { Info "Secedit local security policy and user rights assignments applied" }
 }
 
 # ---------------------------------------------------------------------
@@ -330,8 +348,9 @@ Section "3. Audit Policy & Security Registry Options"
 
 if (Confirm-Prompt "Enable full audit logging across all subcategories?") {
     auditpol /set /category:* /success:enable /failure:enable | Out-Null
+    if ($LASTEXITCODE -ne 0) { Warn "auditpol failed with status code $LASTEXITCODE" }
+    else { Info "Enabled full auditpol logging" }
     Set-RegProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'SCENoApplyLegacyAuditPolicy' 1
-    Info "Enabled full auditpol logging"
 }
 
 if (Confirm-Prompt "Apply Windows Server Security Options, LSA, CAD & LDAP Hardening?") {
@@ -604,17 +623,18 @@ if (Confirm-Prompt "Kill backdoor processes, delete netcat binaries, and prune m
         Info "Killed backdoor process $($p.Name)"
     }
 
-    $ncHits = Get-ChildItem -Path "$env:SystemDrive\" -Recurse -Force -Include 'nc.exe','ncat.exe','netcat.exe' -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -notmatch '\\Windows\\WinSxS' }
+    $ncRoots = @("$env:SystemDrive\Users","$env:ProgramData","$env:SystemDrive\Temp","$env:SystemRoot\Temp")
+    $ncHits = Get-ChildItem -Path $ncRoots -Recurse -Force -Include 'nc.exe','ncat.exe','netcat.exe','nc64.exe' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\Windows\\WinSxS' }
     foreach ($f in $ncHits) {
         Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue
         Info "Deleted netcat binary $($f.FullName)"
     }
 
-    Get-ChildItem -Path "$env:SystemDrive\Users\*" -Recurse -Force -Include '*.mp3','*.mp4','*.avi','*.mkv','*.flac','*.wav','*.mov','*.wmv','*.zip','*.rar','*.7z','*.tar','*.gz','*.deb','*.exe','*.msi','*.torrent' -ErrorAction SilentlyContinue | ForEach-Object {
-        Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
-        Info "Deleted media/archive file: $($_.FullName)"
-    }
+    Get-ChildItem -Path "$env:SystemDrive\Users\*\Desktop\*","$env:SystemDrive\Users\*\Downloads\*","$env:SystemDrive\Users\*\Documents\*","$env:SystemDrive\Users\Public\*" -Recurse -Force -Include '*.mp3','*.mp4','*.avi','*.mkv','*.flac','*.wav','*.mov','*.wmv','*.zip','*.rar','*.7z','*.tar','*.gz','*.deb','*.exe','*.msi','*.torrent' -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch '\\AppData\\' -and $_.Name -notmatch 'Forensics|README|CP-Evidence|CP-Notes' } | ForEach-Object {
+            Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+            Info "Deleted media/archive file: $($_.FullName)"
+        }
 }
 
 # ---------------------------------------------------------------------
@@ -622,17 +642,32 @@ if (Confirm-Prompt "Kill backdoor processes, delete netcat binaries, and prune m
 # ---------------------------------------------------------------------
 Section "10. Automatic Health Check"
 
+$pCount = 0; $fCount = 0; $sCount = 0
 function Check-Health($name, $condition) {
-    if ($condition) { Write-Host "  [ PASS ] $name" -ForegroundColor Green; Info "HEALTH PASS: $name" }
-    else { Write-Host "  [ FAIL ] $name" -ForegroundColor Red; Warn "HEALTH FAIL: $name" }
+    if ($condition) { Write-Host "  [ PASS ] $name" -ForegroundColor Green; Info "HEALTH PASS: $name"; $script:pCount++ }
+    else { Write-Host "  [ FAIL ] $name" -ForegroundColor Red; Warn "HEALTH FAIL: $name"; $script:fCount++ }
 }
 
-Check-Health "Windows Firewall Service Running" ((Get-Service mpssvc).Status -eq 'Running')
-Check-Health "Windows Defender Service Running" ((Get-Service WinDefend).Status -eq 'Running')
+Check-Health "Windows Firewall Service Running" ((Get-Service mpssvc -ErrorAction SilentlyContinue).Status -eq 'Running')
+Check-Health "Windows Defender Service Running" ((Get-Service WinDefend -ErrorAction SilentlyContinue).Status -eq 'Running')
 
 if ($RDPRequired) {
     Check-Health "RDP Listening Port 3389" ((Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue) -ne $null)
+} else {
+    Write-Host "  [ SKIP ] RDP Port Check Skipped" -ForegroundColor Yellow; $sCount++
 }
+
+foreach ($a in $AuthorizedAdmins) {
+    if ($IsDomainController) {
+        $inAdmin = Get-ADGroupMember -Identity 'Domain Admins' -ErrorAction SilentlyContinue | Where-Object { $_.SamAccountName -eq $a }
+        Check-Health "Domain Admin account $a in Domain Admins group" ($inAdmin -ne $null)
+    } else {
+        $inAdmin = Get-LocalGroupMember -Group 'Administrators' -ErrorAction SilentlyContinue | Where-Object { $_.Name.Split('\')[-1] -eq $a }
+        Check-Health "Admin account $a in Administrators group" ($inAdmin -ne $null)
+    }
+}
+
+Write-Host "Health Check Summary: $pCount PASS | $fCount FAIL | $sCount SKIP" -ForegroundColor Green
 
 # ---------------------------------------------------------------------
 # 11. FINAL VERIFICATION REPORT
@@ -640,7 +675,7 @@ if ($RDPRequired) {
 Section "11. Final Verification Report"
 
 Write-Host "Active SMB Shares    : $((Get-SmbShare -ErrorAction SilentlyContinue).Name -join ', ')"
-Write-Host "Firewall Profiles    : Domain=$(Get-NetFirewallProfile -Profile Domain).Enabled, Public=$(Get-NetFirewallProfile -Profile Public).Enabled, Private=$(Get-NetFirewallProfile -Profile Private).Enabled"
+Write-Host "Firewall Profiles    : Domain=$(Get-NetFirewallProfile -Profile Domain -ErrorAction SilentlyContinue).Enabled, Public=$(Get-NetFirewallProfile -Profile Public -ErrorAction SilentlyContinue).Enabled, Private=$(Get-NetFirewallProfile -Profile Private -ErrorAction SilentlyContinue).Enabled"
 
 Write-Host "`n==========================================================" -ForegroundColor Green
 Write-Host "   Windows Server SuperScript Hardening Completed!        " -ForegroundColor Green
