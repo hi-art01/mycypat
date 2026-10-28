@@ -60,55 +60,153 @@ ask_timed() {
 
 inlist() { [[ " $2 " == *" $1 "* ]]; }
 
-# Format-aware config helper: set_kv for flat key-value files
+# Format-aware set_kv using two-pass AWK
 set_kv() {
   local key="$1" val="$2" file="$3" sep="${4:-=}"
   touch "$file"
-  local key_regex
-  key_regex=$(printf '%s' "$key" | sed 's/[.[\*^$()+?{|]/\\&/g')
-  if grep -qE "^[[:space:]]*#?[[:space:]]*${key_regex}([[:space:]]*${sep}|$)" "$file"; then
-    # Replace first occurrence
-    sed -i -E "0,/^[[:space:]]*#?[[:space:]]*${key_regex}([[:space:]]*${sep}|$)/s//${key}${sep}${val}/" "$file"
-    # Delete any subsequent duplicate lines
-    sed -i -E "2,\${/^[[:space:]]*#?[[:space:]]*${key_regex}([[:space:]]*${sep}|$)/d;}" "$file"
-  else
-    echo "${key}${sep}${val}" >> "$file"
-  fi
+  local mode
+  mode=$(stat -c '%a' "$file" 2>/dev/null || echo "644")
+
+  awk -v k="$key" -v v="$val" -v s="$sep" '
+  function key_match(line, key_str,    clean_line, idx, rest) {
+    clean_line = line
+    sub(/^[ \t]*#?[ \t]*/, "", clean_line)
+    idx = index(clean_line, key_str)
+    if (idx != 1) return 0
+    rest = substr(clean_line, length(key_str) + 1)
+    if (rest == "" || rest ~ /^[ \t]*=/ || rest ~ /^[ \t]+/) return 1
+    return 0
+  }
+  function is_commented(line) {
+    return (line ~ /^[ \t]*#/)
+  }
+  BEGIN {
+    target_line = 0
+    uncommented_target = 0
+    commented_target = 0
+  }
+  NR == FNR {
+    if (key_match($0, k)) {
+      if (!is_commented($0)) {
+        if (uncommented_target == 0) uncommented_target = NR
+      } else {
+        if (commented_target == 0) commented_target = NR
+      }
+    }
+    next
+  }
+  {
+    if (uncommented_target > 0) target_line = uncommented_target
+    else target_line = commented_target
+
+    if (key_match($0, k)) {
+      if (FNR == target_line) {
+        if (s == " ") print k " " v
+        else print k s v
+        next
+      } else {
+        if (!is_commented($0)) {
+          next
+        } else {
+          print $0
+          next
+        }
+      }
+    }
+    print $0
+  }
+  END {
+    if (target_line == 0) {
+      if (s == " ") print k " " v
+      else print k s v
+    }
+  }
+  ' "$file" "$file" > "${file}.tmp" && cat "${file}.tmp" > "$file" && rm -f "${file}.tmp"
+  chmod "$mode" "$file" 2>/dev/null || true
 }
 
-# Format-aware config helper: set_ini for INI sectioned files
+# Format-aware set_ini using literal section comparison
 set_ini() {
   local section="$1" key="$2" val="$3" file="$4"
   touch "$file"
-  local sec_regex="\[${section}\]"
-  local key_regex
-  key_regex=$(printf '%s' "$key" | sed 's/[.[\*^$()+?{|]/\\&/g')
+  local mode
+  mode=$(stat -c '%a' "$file" 2>/dev/null || echo "644")
 
-  if grep -qE "^[[:space:]]*${sec_regex}" "$file"; then
-    # Section exists. Check if key exists under this section.
-    if awk -v sec="[$section]" -v k="$key" '
-      BEGIN { found=0; in_sec=0 }
-      $0 ~ "^\\[" { if ($0 ~ "^"sec) in_sec=1; else in_sec=0 }
-      in_sec && $0 ~ "^[[:space:]]*#?[[:space:]]*"k"[[:space:]]*=" { found=1 }
-      END { exit !found }
-    ' "$file"; then
-      # Key exists in section. Replace inside section.
-      awk -v sec="[$section]" -v k="$key" -v v="$val" '
-        BEGIN { in_sec=0; done=0 }
-        $0 ~ "^\\[" { if ($0 ~ "^"sec) in_sec=1; else in_sec=0 }
-        in_sec && !done && $0 ~ "^[[:space:]]*#?[[:space:]]*"k"[[:space:]]*=" {
-          print k " = " v; done=1; next
+  awk -v sec="$section" -v k="$key" -v v="$val" '
+  function trim(s) {
+    sub(/^[ \t]+/, "", s)
+    sub(/[ \t]+$/, "", s)
+    return s
+  }
+  function normalize_key(str,    clean, idx, key_part) {
+    clean = str
+    sub(/^[ \t]*#?[ \t]*/, "", clean)
+    idx = index(clean, "=")
+    if (idx > 0) key_part = substr(clean, 1, idx - 1)
+    else key_part = clean
+    key_part = trim(key_part)
+    gsub(/-/, "_", key_part)
+    return tolower(key_part)
+  }
+  BEGIN {
+    sec_hdr = "[" sec "]"
+    norm_k = tolower(k)
+    gsub(/-/, "_", norm_k)
+    in_sec = 0
+    sec_found = 0
+    key_found = 0
+    key_line = 0
+    sec_hdr_line = 0
+    line_no = 0
+  }
+  NR == FNR {
+    line_no++
+    t = trim($0)
+    if (t ~ /^\[.*\]$/) {
+      if (t == sec_hdr) {
+        in_sec = 1
+        sec_found = 1
+        sec_hdr_line = line_no
+      } else {
+        in_sec = 0
+      }
+      next
+    }
+    if (in_sec && t != "" && t !~ /^#/) {
+      if (normalize_key(t) == norm_k) {
+        if (key_found == 0) {
+          key_found = 1
+          key_line = line_no
         }
-        { print }
-      ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
-    else
-      # Section exists but key doesn't. Insert right after section header.
-      sed -i -E "/^[[:space:]]*${sec_regex}/a ${key} = ${val}" "$file"
-    fi
-  else
-    # Section missing. Append new section and key.
-    echo -e "\n[${section}]\n${key} = ${val}" >> "$file"
-  fi
+      }
+    }
+    next
+  }
+  {
+    current_line = FNR
+    if (sec_found && key_found) {
+      if (current_line == key_line) {
+        print k " = " v
+        next
+      }
+    } else if (sec_found && !key_found) {
+      if (current_line == sec_hdr_line) {
+        print $0
+        print k " = " v
+        next
+      }
+    }
+    print $0
+  }
+  END {
+    if (!sec_found) {
+      if (NR > 0) print ""
+      print sec_hdr
+      print k " = " v
+    }
+  }
+  ' "$file" "$file" > "${file}.tmp" && cat "${file}.tmp" > "$file" && rm -f "${file}.tmp"
+  chmod "$mode" "$file" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------
@@ -289,11 +387,9 @@ if [ "$SELF_TEST" = "yes" ]; then
   echo "   $KEPT_FAMILIES $KEEP_SERVICES $REQUIRED_SOFTWARE"
   echo -e "\n2. Evaluating Package Purge Candidates:"
 
-  # Function to check if a package matches any kept pattern
   is_kept_pkg() {
     local p="$1"
     for kf in $KEPT_FAMILIES $KEEP_SERVICES $REQUIRED_SOFTWARE; do
-      # Exact match or glob match
       # shellcheck disable=SC2053
       if [[ "$p" == $kf ]]; then return 0; fi
     done
@@ -306,7 +402,6 @@ if [ "$SELF_TEST" = "yes" ]; then
         if is_kept_pkg "$inst_p"; then
           echo "   [SKIP KEPT] $inst_p matches kept family/services"
         else
-          # Test simulation purge
           sim_out=$(apt-get -s purge "$inst_p" 2>/dev/null)
           removed_deps=$(echo "$sim_out" | grep -E "^Remv " | awk '{print $2}')
           blocked="no"
@@ -483,8 +578,16 @@ EOF
       if ! grep -qE "pam_wheel\.so" /etc/pam.d/su; then
         sed -i -E "/[[:space:]]*auth[[:space:]]+sufficient[[:space:]]+pam_rootok\.so/a auth required pam_wheel.so use_uid group=${wheel_grp}" /etc/pam.d/su
       fi
-      # Validate
-      if su -c true root 2>/dev/null; then
+
+      # Precise su validation: diff line count, pam_rootok + pam_wheel presence, group existence, runuser session
+      diff_lines=$(diff -u /etc/pam.d/su.cpbak /etc/pam.d/su | grep -c "^+[^+]")
+      first_adm=$(echo "$ADMIN_USERS" | awk '{print $1}')
+
+      if [ "$diff_lines" -eq 1 ] && \
+         grep -q "pam_rootok.so" /etc/pam.d/su && \
+         grep -q "pam_wheel.so" /etc/pam.d/su && \
+         getent group "$wheel_grp" >/dev/null && \
+         { [ -z "$first_adm" ] || runuser -u "$first_adm" -- id &>/dev/null; }; then
         log "Restricted su execution to group $wheel_grp via pam_wheel.so"
       else
         warn "su restriction validation failed! Rolling back /etc/pam.d/su."
@@ -543,7 +646,6 @@ sec_sudoers() {
           clean_entity="${entity#%}"
           if [ "$clean_entity" != "root" ] && [ "$clean_entity" != "sudo" ] && [ "$clean_entity" != "admin" ]; then
             if ! inlist "$clean_entity" "$ADMIN_USERS"; then
-              # Escaped replacement for regex-safe sed substitution
               escaped_line=$(printf '%s\n' "$line" | sed 's/[[\.*^$()+?{|]/\\&/g')
               sed -i "s|^${escaped_line}|# UNKNOWN ADMIN REMOVED: ${line}|g" "$sf" 2>/dev/null || sed -i "s|^|# UNKNOWN ADMIN REMOVED: |g" "$sf"
               log "Commented out unauthorized sudoers line in $sf: $line"
@@ -787,7 +889,7 @@ sec_backdoor() {
       kill -9 "$pid" 2>/dev/null && log "Killed backdoor PID $pid"
     done
 
-    # Trace perl/python/ruby network listeners (if lsof or ss available)
+    # Trace perl/python/ruby network listeners (if lsof available)
     if command -v lsof >/dev/null 2>&1; then
       lsof -i -n -P 2>/dev/null | grep LISTEN | grep -E "perl|python|ruby" | while read -r line; do
         pid=$(echo "$line" | awk '{print $2}')
@@ -857,13 +959,33 @@ sec_files() {
     done
 
     # 2. Archives and Installers under /home, /root, /tmp, /var/tmp, /srv, /opt
-    find /home /root /tmp /var/tmp /srv /opt -xdev -type f \( -iname '*.zip' -o -iname '*.rar' \
+    # Exclude tar/gz/tgz/bz2/xz under /opt and /srv, protect REQUIRED_SOFTWARE & /srv/ftp|www|http|samba|nfs
+    find /home /root /tmp /var/tmp -xdev -type f \( -iname '*.zip' -o -iname '*.rar' \
       -o -iname '*.7z' -o -iname '*.tar' -o -iname '*.gz' -o -iname '*.tgz' -o -iname '*.bz2' \
       -o -iname '*.xz' -o -iname '*.deb' -o -iname '*.rpm' -o -iname '*.exe' -o -iname '*.msi' \
       -o -iname '*.run' -o -iname '*.AppImage' \) -not -name "Forensics*" -not -name "README*" 2>/dev/null | while read -r af; do
         parent_dir=$(dirname "$af")
         if ! dpkg -S "$parent_dir" &>/dev/null; then
           rm -f "$af" && log "Deleted archive/installer file: $af"
+        fi
+    done
+
+    find /srv /opt -xdev -type f \( -iname '*.zip' -o -iname '*.rar' -o -iname '*.7z' \
+      -o -iname '*.deb' -o -iname '*.rpm' -o -iname '*.exe' -o -iname '*.msi' \
+      -o -iname '*.run' -o -iname '*.AppImage' -o -iname '*.torrent' \) \
+      -not -path "/srv/ftp/*" -not -path "/srv/www/*" -not -path "/srv/http/*" \
+      -not -path "/srv/samba/*" -not -path "/srv/nfs/*" \
+      -not -name "Forensics*" -not -name "README*" 2>/dev/null | while read -r af; do
+        # Protect required software or kept service names in path
+        keep_path="no"
+        for req_p in $REQUIRED_SOFTWARE $KEEP_SERVICES; do
+          if [[ "$af" == *"$req_p"* ]]; then keep_path="yes"; break; fi
+        done
+        if [ "$keep_path" = "no" ]; then
+          parent_dir=$(dirname "$af")
+          if ! dpkg -S "$parent_dir" &>/dev/null; then
+            rm -f "$af" && log "Deleted archive/installer file under /srv|/opt: $af"
+          fi
         fi
     done
 
@@ -1004,7 +1126,6 @@ TraceEnable Off
 </Directory>
 EOF
       a2enconf cp-hardening >/dev/null 2>&1
-      # Disable default site index.html if it's the default "It works!" page
       if grep -q "Ubuntu - It works" /var/www/html/index.html 2>/dev/null; then
         rm -f /var/www/html/index.html
       fi
@@ -1048,7 +1169,6 @@ EOF
       set_ini "global" "server min protocol" "SMB2" /etc/samba/smb.conf
       set_ini "global" "server signing" "mandatory" /etc/samba/smb.conf
 
-      # Set guest ok = no on share sections
       awk '
         /^\[/ { in_share = ($0 !~ /^\[(global|homes|printers)\]/) }
         in_share && /^[[:space:]]*guest ok[[:space:]]*=/ { print "   guest ok = no"; next }
@@ -1062,17 +1182,33 @@ EOF
       fi
     fi
 
-    # MySQL / MariaDB
-    for myconf in /etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/mariadb.conf.d/50-server.cnf /etc/mysql/conf.d/cp-hardening.cnf; do
-      if [ -f "$myconf" ] || [ "$myconf" = "/etc/mysql/conf.d/cp-hardening.cnf" ]; then
-        set_ini "mysqld" "bind-address" "127.0.0.1" "$myconf"
-        set_ini "mysqld" "local-infile" "0" "$myconf"
-        if systemctl restart mysql 2>/dev/null || systemctl restart mariadb 2>/dev/null; then
-          log "Hardened MySQL / MariaDB server ($myconf)"
-          break
+    # MySQL / MariaDB (Only run if mysqld or mariadbd executable exists)
+    if command -v mysqld >/dev/null 2>&1 || command -v mariadbd >/dev/null 2>&1; then
+      target_myconf=""
+      if [ -f /etc/mysql/mysql.conf.d/mysqld.cnf ]; then
+        target_myconf="/etc/mysql/mysql.conf.d/mysqld.cnf"
+      elif [ -f /etc/mysql/mariadb.conf.d/50-server.cnf ]; then
+        target_myconf="/etc/mysql/mariadb.conf.d/50-server.cnf"
+      else
+        target_myconf="/etc/mysql/conf.d/cp-hardening.cnf"
+        mkdir -p /etc/mysql/conf.d
+      fi
+
+      cp "$target_myconf" "${target_myconf}.cpbak" 2>/dev/null || true
+      set_ini "mysqld" "bind-address" "127.0.0.1" "$target_myconf"
+      set_ini "mysqld" "local-infile" "0" "$target_myconf"
+
+      if systemctl restart mysql 2>/dev/null || systemctl restart mariadb 2>/dev/null; then
+        log "Hardened MySQL / MariaDB server ($target_myconf)"
+      else
+        warn "MySQL/MariaDB restart failed! Rolling back $target_myconf"
+        if [ -f "${target_myconf}.cpbak" ]; then
+          cp "${target_myconf}.cpbak" "$target_myconf"
+        else
+          rm -f "$target_myconf"
         fi
       fi
-    done
+    fi
 
     # PHP
     for phpini in /etc/php/*/*/php.ini; do
