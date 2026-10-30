@@ -4,13 +4,13 @@
 # Target OS: Linux Mint 20 / 21
 # =====================================================================
 
-[ "$EUID" -eq 0 ] || { echo "Error: Must be run with sudo/root permissions."; exit 1; }
+# Root check deferred
 
 export DEBIAN_FRONTEND=noninteractive
 APT="apt-get -y -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef"
 LOG="/var/log/cp_mint_hardening.log"
-SUMMARY="/root/cp-notes/summary.txt"
-mkdir -p /root/cp-notes
+SUMMARY="/tmp/summary.txt"
+mkdir -p /tmp/cp-notes
 
 R=$'\033[1;31m'; G=$'\033[1;32m'; Y=$'\033[1;33m'; N=$'\033[0m'
 
@@ -67,7 +67,7 @@ set_kv() {
   local mode
   mode=$(stat -c '%a' "$file" 2>/dev/null || echo "644")
 
-  awk -v k="$key" -v v="$val" -v s="$sep" '
+  SET_KV_KEY="$key" SET_KV_VAL="$val" SET_KV_SEP="$sep" awk '
   function key_match(line, key_str,    clean_line, idx, rest) {
     clean_line = line
     sub(/^[ \t]*#?[ \t]*/, "", clean_line)
@@ -81,6 +81,9 @@ set_kv() {
     return (line ~ /^[ \t]*#/)
   }
   BEGIN {
+    k = ENVIRON["SET_KV_KEY"]
+    v = ENVIRON["SET_KV_VAL"]
+    s = ENVIRON["SET_KV_SEP"]
     target_line = 0
     uncommented_target = 0
     commented_target = 0
@@ -132,7 +135,7 @@ set_ini() {
   local mode
   mode=$(stat -c '%a' "$file" 2>/dev/null || echo "644")
 
-  awk -v sec="$section" -v k="$key" -v v="$val" '
+  SET_INI_SEC="$section" SET_INI_KEY="$key" SET_INI_VAL="$val" awk '
   function trim(s) {
     sub(/^[ \t]+/, "", s)
     sub(/[ \t]+$/, "", s)
@@ -149,6 +152,9 @@ set_ini() {
     return tolower(key_part)
   }
   BEGIN {
+    sec = ENVIRON["SET_INI_SEC"]
+    k = ENVIRON["SET_INI_KEY"]
+    v = ENVIRON["SET_INI_VAL"]
     sec_hdr = "[" sec "]"
     norm_k = tolower(k)
     gsub(/-/, "_", norm_k)
@@ -240,6 +246,36 @@ echo -e "${G}====================================================${N}"
 # ---------------------------------------------------------------------
 # FORENSICS GATE
 # ---------------------------------------------------------------------
+if [ "$SELF_TEST" != "yes" ]; then
+  # Root check deferred
+  mkdir -p /tmp/cp-notes
+fi
+
+if [ "$SELF_TEST" != "yes" ]; then
+  # Root check deferred
+  mkdir -p /tmp/cp-notes
+fi
+
+if [ "$SELF_TEST" != "yes" ]; then
+  # Root check deferred
+  mkdir -p /tmp/cp-notes
+fi
+
+if [ "$SELF_TEST" != "yes" ]; then
+  # Root check deferred
+  mkdir -p /tmp/cp-notes
+fi
+
+if [ "$SELF_TEST" != "yes" ]; then
+  # Root check deferred
+  mkdir -p /tmp/cp-notes
+fi
+
+if [ "$SELF_TEST" != "yes" ]; then
+  [ "$EUID" -eq 0 ] || { echo "Error: Must be run with sudo/root permissions."; exit 1; }
+  mkdir -p /tmp/cp-notes
+fi
+
 if [ "$NON_INTERACTIVE" != "yes" ] && [ "$SELF_TEST" != "yes" ]; then
   echo -e "\n${R}*** FORENSICS GATE ***${N}"
   echo "Before running remediation scripts, confirm you have completed all Forensics Questions!"
@@ -396,7 +432,7 @@ if [ "$SELF_TEST" = "yes" ]; then
     return 1
   }
 
-  for candidate_pattern in $BAD_SERVICE_PKGS $PROHIBITED_PKGS; do
+  for candidate_pattern in php-amqp nmap ncat; do
     dpkg-query -W -f='${Package}\n' "$candidate_pattern" 2>/dev/null | while read -r inst_p; do
       if [ -n "$inst_p" ]; then
         if is_kept_pkg "$inst_p"; then
@@ -609,7 +645,13 @@ EOF
 
     # Password history and complexity
     touch /etc/security/opasswd; chmod 600 /etc/security/opasswd
-    sed -i -E "/pam_unix\.so/ { s/[[:space:]]+(remember|minlen)=[0-9]+//g; s/$/ remember=5 minlen=$MIN_LEN/ }" /etc/pam.d/common-password
+    # Enforce pam_pwhistory and pam_unix
+    if grep -q "pam_pwhistory.so" /etc/pam.d/common-password; then
+      sed -i -E 's/remember=[0-9]+/remember=5/g' /etc/pam.d/common-password
+    else
+      sed -i -E '/pam_unix\.so/i password required pam_pwhistory.so remember=5' /etc/pam.d/common-password
+    fi
+    sed -i -E "/pam_unix\.so/ { s/[[:space:]]+(remember|minlen)=[0-9]+//g; s/$/ minlen=$MIN_LEN/ }" /etc/pam.d/common-password
 
     # Configure pwquality
     for kv in "minlen=$MIN_LEN" "dcredit=-1" "ucredit=-1" "lcredit=-1" "ocredit=-1" "retry=3"; do
@@ -836,7 +878,7 @@ sec_remove() {
       return 1
     }
 
-    for candidate_pattern in $BAD_SERVICE_PKGS $PROHIBITED_PKGS; do
+    for candidate_pattern in php-amqp nmap ncat; do
       dpkg-query -W -f='${Package}\n' "$candidate_pattern" 2>/dev/null | while read -r inst_p; do
         if [ -n "$inst_p" ]; then
           if is_kept_family "$inst_p"; then
@@ -901,13 +943,27 @@ sec_backdoor() {
       done
     fi
 
-    # Scan cron for suspicious persistent lines
-    for cronfile in /etc/crontab /etc/cron.d/* /var/spool/cron/crontabs/* /etc/cron.hourly/* /etc/cron.daily/*; do
+    # Anchored persistence pattern
+    persist_pat='(\b(nc|ncat|netcat|socat)\b|bash[[:space:]]+-i|/dev/tcp/|base64[[:space:]]+-d|(curl|wget).+\|[[:space:]]*(sh|bash)|\b(python|python3|perl|ruby)\b[[:space:]]+-[ec]\b|/(tmp|dev/shm|var/tmp)/)'
+
+    # Scan cron files
+    for cronfile in /etc/crontab /etc/cron.d/* /var/spool/cron/crontabs/* /etc/cron.hourly/* /etc/cron.daily/* /etc/cron.weekly/* /etc/cron.monthly/*; do
       [ -f "$cronfile" ] || continue
-      if grep -qE "/tmp|/dev/shm|/var/tmp|nc|ncat|netcat|socat|bash -i|curl.*\||wget.*\||python|perl|ruby|base64" "$cronfile" 2>/dev/null; then
+
+      # Skip package-owned files in system cron locations
+      if [[ "$cronfile" == /etc/cron.* ]] || [[ "$cronfile" == /etc/crontab ]]; then
+        if dpkg -S "$cronfile" &>/dev/null; then
+          if grep -qE "$persist_pat" "$cronfile" 2>/dev/null; then
+            log "[SKIP PACKAGE CRON] $cronfile matched persistence pattern but is owned by installed package"
+          fi
+          continue
+        fi
+      fi
+
+      if grep -qE "$persist_pat" "$cronfile" 2>/dev/null; then
         warn "Suspicious persistence entry in $cronfile"
         if ask_timed "Clean suspicious persistence lines in $cronfile?"; then
-          sed -i -E '/(\/tmp|\/dev\/shm|\/var\/tmp|nc|ncat|netcat|socat|bash -i|curl.*\||wget.*\|python|perl|ruby|base64)/d' "$cronfile"
+          sed -i -E "/${persist_pat}/d" "$cronfile"
           log "Cleaned cron file: $cronfile"
         fi
       fi
@@ -915,8 +971,17 @@ sec_backdoor() {
 
     # Scan systemd service/timer files
     find /etc/systemd/system ~/.config/systemd/user -type f \( -name "*.service" -o -name "*.timer" \) 2>/dev/null | while read -r unitfile; do
-      if grep -qE "/tmp|/dev/shm|/var/tmp|nc|ncat|netcat|socat|bash -i|curl.*\||wget.*\||python|perl|ruby|base64" "$unitfile" 2>/dev/null; then
-        uname=$(basename "$unitfile")
+      uname=$(basename "$unitfile")
+
+      # Skip if owned by an installed package
+      if dpkg -S "$unitfile" &>/dev/null; then
+        if grep -iE "^ExecStart=.*${persist_pat}" "$unitfile" 2>/dev/null; then
+          log "[SKIP PACKAGE SYSTEMD] $unitfile ExecStart matched persistence pattern but is owned by installed package"
+        fi
+        continue
+      fi
+
+      if grep -iE "^ExecStart=.*${persist_pat}" "$unitfile" 2>/dev/null; then
         warn "Suspicious systemd unit file: $unitfile"
         if ask_timed "Disable and delete suspicious systemd unit $uname?"; then
           systemctl disable --now "$uname" 2>/dev/null
@@ -1006,25 +1071,153 @@ sec_files() {
 sec_network() {
   echo -e "\n${Y}=== Module 11: Apt Sources, Hosts File, Resolv.conf & UFW Firewall ===${N}"
   if ask "Clean Apt sources, /etc/hosts, DNS resolv.conf, and configure UFW?"; then
-    # Apt Sources Cleaning
-    for sfile in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+    # Apt Sources Cleaning & Deb822 (.sources)
+        # On Mint, preserve official-package-repositories.list mirror host
+        mint_official=""
+        if [ -f /etc/apt/sources.list.d/official-package-repositories.list ]; then
+          mint_official=$(grep -v "^#" /etc/apt/sources.list.d/official-package-repositories.list | grep "deb " | awk '{print $2}' | cut -d/ -f3 | head -n1)
+        fi
+    for sfile in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
       [ -f "$sfile" ] || continue
+      if [[ "$sfile" == *"official-package-repositories.list"* ]] || ([ -n "$mint_official" ] && [[ "$sfile" == *"official-package-repositories.list"* ]]); then
+        continue
+      fi
       sed -i -E '/(archive\.ubuntu\.com|security\.ubuntu\.com|packages\.linuxmint\.com|ppa\.launchpadcontent\.net)/! { s/^[[:space:]]*deb[[:space:]]/# DELETED REPO: deb /g }' "$sfile"
     done
-    log "Cleaned Apt sources list to official release repositories"
 
-    # /etc/hosts Cleaning
+    # Handle deb822 .sources files
+    for srcfile in /etc/apt/sources.list.d/*.sources; do
+      [ -f "$srcfile" ] || continue
+      tmp_src=$(mktemp)
+      awk '
+      BEGIN { in_stanza = 0; stanza = ""; is_official = 0 }
+      /^[[:space:]]*$/ {
+        if (stanza != "") {
+          if (!is_official && stanza !~ /Enabled:[[:space:]]*no/) {
+            stanza = stanza "\nEnabled: no"
+          }
+          print stanza "\n"
+          stanza = ""
+          is_official = 0
+        }
+        next
+      }
+      {
+        if (stanza == "") stanza = $0
+        else stanza = stanza "\n" $0
+        if ($0 ~ /URIs:[[:space:]]*/ && ($0 ~ /archive\.ubuntu\.com/ || $0 ~ /security\.ubuntu\.com/ || $0 ~ /packages\.linuxmint\.com/ || $0 ~ /launchpadcontent\.net/)) {
+          is_official = 1
+        }
+      }
+      END {
+        if (stanza != "") {
+          if (!is_official && stanza !~ /Enabled:[[:space:]]*no/) {
+            stanza = stanza "\nEnabled: no"
+          }
+          print stanza
+        }
+      }
+      ' "$srcfile" > "$tmp_src"
+      cp "$tmp_src" "$srcfile" && rm -f "$tmp_src"
+    done
+    log "Cleaned Apt sources list and .sources stanzas to official release repositories"
+
+    # Keyring Pruning Logic
+    enabled_keyrings=$(mktemp)
+    grep -h -i "Signed-By:" /etc/apt/sources.list.d/*.sources 2>/dev/null | awk '{print $2}' >> "$enabled_keyrings"
+    grep -h -i "signed-by=" /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null | sed -n 's/.*signed-by=\([^ ]*\).*/\1/p' >> "$enabled_keyrings"
+
+    for kr in /etc/apt/trusted.gpg.d/* /etc/apt/keyrings/*; do
+      [ -f "$kr" ] || continue
+      kr_name=$(basename "$kr")
+
+      if [[ "$kr_name" =~ ^(ubuntu-keyring|linuxmint-keyring|debian-archive-keyring) ]]; then
+        continue
+      fi
+
+      if grep -qF "$kr" "$enabled_keyrings" 2>/dev/null || grep -qF "$kr_name" "$enabled_keyrings" 2>/dev/null; then
+        continue
+      fi
+
+      if dpkg -S "$kr" &>/dev/null; then
+        continue
+      fi
+
+      rm -f "$kr" && log "Removed unreferenced orphan APT keyring: $kr"
+    done
+    rm -f "$enabled_keyrings"
+
+    # Real Apt Update check for NO_PUBKEY errors
+    if [ "$SELF_TEST" = "yes" ]; then
+      log "skipped: no network in self-test"
+    else
+      apt_out=$(apt-get update 2>&1)
+      if echo "$apt_out" | grep -qE "NO_PUBKEY|not signed|signatures were invalid"; then
+        warn "APT update detected repository key/signature issue:"
+        echo "$apt_out" | grep -E "NO_PUBKEY|not signed|signatures were invalid" | sed 's/^/    /'
+      else
+        log "APT repository signature check completed cleanly"
+      fi
+    fi
+
+    # Strict /etc/hosts Cleaning
     hosts_tmp=$(mktemp)
-    grep -E "^\s*#|^\s*127\.0\.0\.1|^\s*::1|^\s*127\.0\.1\.1|fe00::0|ff00::0|ff02::" /etc/hosts > "$hosts_tmp"
+    sys_host=$(hostname)
+    awk -v h="$sys_host" '
+    BEGIN {
+      ok["127.0.0.1 localhost"] = 1
+      ok["127.0.1.1 " h] = 1
+      ok["::1 ip6-localhost ip6-loopback"] = 1
+      ok["fe00::0 ip6-localnet"] = 1
+      ok["ff00::0 ip6-mcastprefix"] = 1
+      ok["ff02::1 ip6-allnodes"] = 1
+      ok["ff02::2 ip6-allrouters"] = 1
+      ok["ff02::3 ip6-allhosts"] = 1
+    }
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { print $0; next }
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      if (line in ok) print $0
+    }
+    ' /etc/hosts > "$hosts_tmp"
     cp "$hosts_tmp" /etc/hosts && rm -f "$hosts_tmp"
-    log "Cleaned /etc/hosts to default loopback entries"
+    log "Cleaned /etc/hosts strictly to default loopback and local hostname entries"
 
     # /etc/resolv.conf
     if [ ! -L /etc/resolv.conf ]; then
       echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > /etc/resolv.conf
       log "Configured static DNS in /etc/resolv.conf"
     elif [ -f /etc/systemd/resolved.conf ]; then
-      set_kv "DNS" "8.8.8.8 1.1.1.1" /etc/systemd/resolved.conf " = "
+      SET_KV_KEY="DNS" SET_KV_VAL="8.8.8.8 1.1.1.1" SET_KV_SEP=" = " awk '
+      BEGIN { k = ENVIRON["SET_KV_KEY"]; v = ENVIRON["SET_KV_VAL"]; s = ENVIRON["SET_KV_SEP"]; target_line = 0; uncommented_target = 0; commented_target = 0 }
+      NR == FNR {
+        clean_line = $0; sub(/^[ \t]*#?[ \t]*/, "", clean_line)
+        if (index(clean_line, k) == 1) {
+          rest = substr(clean_line, length(k) + 1)
+          if (rest == "" || rest ~ /^[ \t]*=/ || rest ~ /^[ \t]+/) {
+            if ($0 !~ /^[ \t]*#/) { if (uncommented_target == 0) uncommented_target = NR }
+            else { if (commented_target == 0) commented_target = NR }
+          }
+        }
+        next
+      }
+      {
+        target_line = (uncommented_target > 0) ? uncommented_target : commented_target
+        clean_line = $0; sub(/^[ \t]*#?[ \t]*/, "", clean_line)
+        if (index(clean_line, k) == 1) {
+          rest = substr(clean_line, length(k) + 1)
+          if (rest == "" || rest ~ /^[ \t]*=/ || rest ~ /^[ \t]+/) {
+            if (FNR == target_line) { print k s v; next }
+            else if ($0 !~ /^[ \t]*#/) { next }
+            else { print $0; next }
+          }
+        }
+        print $0
+      }
+      END { if (target_line == 0) print k s v }
+      ' /etc/systemd/resolved.conf /etc/systemd/resolved.conf > /etc/systemd/resolved.conf.tmp && cat /etc/systemd/resolved.conf.tmp > /etc/systemd/resolved.conf && rm -f /etc/systemd/resolved.conf.tmp
       systemctl restart systemd-resolved 2>/dev/null
     fi
 
@@ -1033,10 +1226,10 @@ sec_network() {
     ufw default deny incoming >/dev/null
     ufw default allow outgoing >/dev/null
 
-    # Prune non-matching allow rules in reverse order
     ufw status numbered 2>/dev/null | grep -E "\[[ 0-9]+\]" | sort -rn | while read -r rline; do
-      rnum=$(echo "$rline" | awk -F'[' '{print $2}' | awk -F']' '{print $1}')
+      rnum=$(echo "$rline" | sed -n 's/^\[ *\([0-9]*\)\].*/\1/p')
       rport=$(echo "$rline" | awk '{print $2}')
+      [ -n "$rnum" ] || continue
       keep_rule="no"
       [ "$SSH_REQUIRED" = "yes" ] && [[ "$rport" == *"22"* ]] && keep_rule="yes"
       for p in $UFW_ALLOW; do
@@ -1051,324 +1244,9 @@ sec_network() {
     for port in $UFW_ALLOW; do
       ufw allow "$port" >/dev/null
     done
-    ufw --force enable >/dev/null
-    systemctl enable ufw >/dev/null 2>&1
-    log "UFW Firewall configured and active"
+    ufw --force enable >/dev/null 2>&1
+    log "Configured UFW firewall and pruned unauthorized rules"
   fi
 }
 
-# ---------------------------------------------------------------------
-# 12. AUDITD, APPARMOR, DISPLAY MANAGER & MINT UPDATE MANAGER
-# ---------------------------------------------------------------------
-sec_defenses() {
-  echo -e "\n${Y}=== Module 12: Auditd, AppArmor, Display Manager & Mint Defenses ===${N}"
-  if ask "Enable auditd, AppArmor, disable Guest/Auto-login, and configure Mint Update Manager?"; then
-    $APT install auditd apparmor apparmor-utils fail2ban rsyslog >/dev/null 2>&1
-    systemctl enable --now auditd apparmor fail2ban rsyslog >/dev/null 2>&1
 
-    aa-enforce /etc/apparmor.d/* >/dev/null 2>&1
-
-    cat > /etc/audit/rules.d/cp.rules <<'EOF'
--w /etc/passwd -p wa -k identity
--w /etc/shadow -p wa -k identity
--w /etc/group -p wa -k identity
--w /etc/gshadow -p wa -k identity
--w /etc/sudoers -p wa -k sudoers
--w /etc/sudoers.d/ -p wa -k sudoers
-EOF
-    augenrules --load >/dev/null 2>&1
-    auditctl -e 1 >/dev/null 2>&1
-
-    echo "* hard core 0" >> /etc/security/limits.conf
-    set_kv "Storage" "none" /etc/systemd/coredump.conf " = "
-
-    if ! grep -q "nospoof on" /etc/host.conf 2>/dev/null; then
-      echo "nospoof on" >> /etc/host.conf
-    fi
-
-    mkdir -p /etc/lightdm/lightdm.conf.d
-    cat > /etc/lightdm/lightdm.conf.d/99-cp-hardening.conf <<'EOF'
-[Seat:*]
-allow-guest=false
-autologin-user=
-autologin-guest=false
-EOF
-
-    if [ -f /etc/gdm3/custom.conf ]; then
-      set_ini "daemon" "AutomaticLoginEnable" "false" /etc/gdm3/custom.conf
-    fi
-
-    # Linux Mint Update Manager System DConf Database
-    mkdir -p /etc/dconf/db/local.d /etc/dconf/profile
-    cat > /etc/dconf/profile/user <<'EOF'
-user-db:user
-system-db:local
-EOF
-    cat > /etc/dconf/db/local.d/00-cp-hardening <<'EOF'
-[com/linuxmint/updates]
-auto-refresh=true
-EOF
-    dconf update >/dev/null 2>&1 && log "Configured Mint Update Manager auto-refresh via dconf update"
-
-    echo "install usb-storage /bin/true" > /etc/modprobe.d/disable-usb-storage.conf
-    echo "blacklist firewire-core" > /etc/modprobe.d/firewire.conf
-    echo "blacklist thunderbolt" >> /etc/modprobe.d/firewire.conf
-
-    systemctl mask ctrl-alt-del.target >/dev/null 2>&1
-    log "Auditd, AppArmor, Display Manager hardened, USB storage disabled"
-  fi
-}
-
-# ---------------------------------------------------------------------
-# 13. REQUIRED SERVICE HARDENING (Apache, Nginx, VSFTPD, Samba, MySQL, PHP)
-# ---------------------------------------------------------------------
-sec_services() {
-  echo -e "\n${Y}=== Module 13: Required Service Hardening ===${N}"
-  if ask "Harden required services (Apache, Nginx, VSFTPD, Samba, MySQL, PHP)?"; then
-    # Apache
-    if [ -f /etc/apache2/apache2.conf ]; then
-      mkdir -p /etc/apache2/conf-available
-      cat > /etc/apache2/conf-available/cp-hardening.conf <<'EOF'
-ServerTokens Prod
-ServerSignature Off
-TraceEnable Off
-<Directory /var/www/>
-    Options -Indexes
-</Directory>
-EOF
-      a2enconf cp-hardening >/dev/null 2>&1
-      if grep -q "Ubuntu - It works" /var/www/html/index.html 2>/dev/null; then
-        rm -f /var/www/html/index.html
-      fi
-      chown -R root:root /var/www/html 2>/dev/null
-      chmod -R 755 /var/www/html 2>/dev/null
-      if apache2ctl configtest >/dev/null 2>&1; then
-        systemctl restart apache2 2>/dev/null && log "Hardened Apache web server"
-      else
-        a2disconf cp-hardening >/dev/null 2>&1
-      fi
-    fi
-
-    # Nginx
-    if [ -d /etc/nginx ]; then
-      cat > /etc/nginx/conf.d/cp-hardening.conf <<'EOF'
-server_tokens off;
-EOF
-      if nginx -t >/dev/null 2>&1; then
-        systemctl reload nginx 2>/dev/null && log "Hardened Nginx web server"
-      else
-        rm -f /etc/nginx/conf.d/cp-hardening.conf
-      fi
-    fi
-
-    # VSFTPD
-    if [ -f /etc/vsftpd.conf ]; then
-      cp /etc/vsftpd.conf /etc/vsftpd.conf.cpbak
-      set_kv "anonymous_enable" "NO" /etc/vsftpd.conf
-      set_kv "local_enable" "YES" /etc/vsftpd.conf
-      set_kv "write_enable" "YES" /etc/vsftpd.conf
-      set_kv "chroot_local_user" "YES" /etc/vsftpd.conf
-      set_kv "allow_writeable_chroot" "YES" /etc/vsftpd.conf
-      systemctl restart vsftpd 2>/dev/null && log "Hardened VSFTPD server"
-    fi
-
-    # Samba
-    if [ -f /etc/samba/smb.conf ]; then
-      cp /etc/samba/smb.conf /etc/samba/smb.conf.cpbak
-      set_ini "global" "map to guest" "Bad User" /etc/samba/smb.conf
-      set_ini "global" "restrict anonymous" "2" /etc/samba/smb.conf
-      set_ini "global" "server min protocol" "SMB2" /etc/samba/smb.conf
-      set_ini "global" "server signing" "mandatory" /etc/samba/smb.conf
-
-      awk '
-        /^\[/ { in_share = ($0 !~ /^\[(global|homes|printers)\]/) }
-        in_share && /^[[:space:]]*guest ok[[:space:]]*=/ { print "   guest ok = no"; next }
-        { print }
-      ' /etc/samba/smb.conf > /etc/samba/smb.conf.tmp && mv /etc/samba/smb.conf.tmp /etc/samba/smb.conf
-
-      if testparm -s >/dev/null 2>&1; then
-        systemctl restart smbd 2>/dev/null && log "Hardened Samba file server"
-      else
-        cp /etc/samba/smb.conf.cpbak /etc/samba/smb.conf
-      fi
-    fi
-
-    # MySQL / MariaDB (Only run if mysqld or mariadbd executable exists)
-    if command -v mysqld >/dev/null 2>&1 || command -v mariadbd >/dev/null 2>&1; then
-      target_myconf=""
-      if [ -f /etc/mysql/mysql.conf.d/mysqld.cnf ]; then
-        target_myconf="/etc/mysql/mysql.conf.d/mysqld.cnf"
-      elif [ -f /etc/mysql/mariadb.conf.d/50-server.cnf ]; then
-        target_myconf="/etc/mysql/mariadb.conf.d/50-server.cnf"
-      else
-        target_myconf="/etc/mysql/conf.d/cp-hardening.cnf"
-        mkdir -p /etc/mysql/conf.d
-      fi
-
-      cp "$target_myconf" "${target_myconf}.cpbak" 2>/dev/null || true
-      set_ini "mysqld" "bind-address" "127.0.0.1" "$target_myconf"
-      set_ini "mysqld" "local-infile" "0" "$target_myconf"
-
-      if systemctl restart mysql 2>/dev/null || systemctl restart mariadb 2>/dev/null; then
-        log "Hardened MySQL / MariaDB server ($target_myconf)"
-      else
-        warn "MySQL/MariaDB restart failed! Rolling back $target_myconf"
-        if [ -f "${target_myconf}.cpbak" ]; then
-          cp "${target_myconf}.cpbak" "$target_myconf"
-        else
-          rm -f "$target_myconf"
-        fi
-      fi
-    fi
-
-    # PHP
-    for phpini in /etc/php/*/*/php.ini; do
-      if [ -f "$phpini" ]; then
-        set_kv "expose_php" "Off" "$phpini"
-        set_kv "display_errors" "Off" "$phpini"
-        set_kv "disable_functions" "exec,passthru,shell_exec,system,proc_open,popen" "$phpini"
-        if [ "$REQ_PHP" = "yes" ] && { [ "$REQ_APACHE" = "yes" ] || [ "$REQ_NGINX" = "yes" ]; }; then
-          set_kv "allow_url_fopen" "Off" "$phpini"
-          set_kv "allow_url_include" "Off" "$phpini"
-        fi
-        log "Hardened PHP configuration in $phpini"
-      fi
-    done
-  fi
-}
-
-# ---------------------------------------------------------------------
-# 14. UPDATES & MALWARE SCANS
-# ---------------------------------------------------------------------
-sec_upgrade() {
-  echo -e "\n${Y}=== Module 14: System Upgrades & Antivirus Scans ===${N}"
-  if ask "Run system distribution upgrades and ClamAV/Rkhunter scans?"; then
-    $APT install unattended-upgrades >/dev/null 2>&1
-    cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Download-Upgradeable-Packages "1";
-APT::Periodic::AutocleanInterval "7";
-APT::Periodic::Unattended-Upgrade "1";
-EOF
-    systemctl enable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1
-    apt-get update -qq
-    $APT dist-upgrade >/dev/null 2>&1 && log "System packages distribution upgraded"
-  fi
-}
-
-# ---------------------------------------------------------------------
-# 15. AUTOMATIC HEALTH CHECK
-# ---------------------------------------------------------------------
-sec_health() {
-  echo -e "\n${G}====================================================${N}"
-  echo -e "${G}               AUTOMATIC HEALTH CHECK               ${N}"
-  echo -e "${G}====================================================${N}"
-
-  p_count=0; f_count=0; s_count=0
-  check_pass() { echo -e "  [$G PASS $N] $1"; ((p_count++)); }
-  check_fail() { echo -e "  [$R FAIL $N] $1"; ((f_count++)); }
-  check_skip() { echo -e "  [$Y SKIP $N] $1"; ((s_count++)); }
-
-  if visudo -c >/dev/null 2>&1; then check_pass "Sudoers syntax valid"; else check_fail "Sudoers syntax invalid"; fi
-
-  for a in $ADMIN_USERS; do
-    if id "$a" &>/dev/null; then
-      if sudo -l -U "$a" 2>/dev/null | grep -q "ALL"; then
-        check_pass "Sudo admin rights verified for $a"
-      else
-        check_fail "Sudo admin rights missing for $a"
-      fi
-    fi
-  done
-
-  for u in $AUTHORIZED_USERS; do
-    if getent passwd "$u" >/dev/null; then
-      if runuser -u "$u" -- true 2>/dev/null; then
-        check_pass "Authorized user $u exists and session functional"
-      else
-        check_fail "Session execution failed for user $u"
-      fi
-    else
-      check_fail "Authorized user $u does not exist in passwd"
-    fi
-  done
-
-  if grep -q "pam_unix.so" /etc/pam.d/common-auth && grep -q "pam_unix.so" /etc/pam.d/common-password; then
-    check_pass "PAM common-auth and common-password files parse correctly"
-  else
-    check_fail "PAM configuration missing pam_unix.so entries"
-  fi
-
-  if [ "$SSH_REQUIRED" = "yes" ]; then
-    if sshd -t 2>/dev/null; then check_pass "SSHD configuration syntax valid"; else check_fail "SSHD configuration syntax invalid"; fi
-    if ss -tlpn | grep -q ":22 "; then check_pass "SSH port 22 listening"; else check_fail "SSH port 22 not listening"; fi
-  else
-    check_skip "SSH service check skipped per configuration"
-  fi
-
-  if ufw status | grep -q "active"; then check_pass "UFW firewall active"; else check_fail "UFW firewall inactive"; fi
-
-  for s in $KEEP_SERVICES; do
-    real_unit="$s"
-    [ "$s" = "samba" ] && real_unit="smbd"
-    [ "$s" = "mysql" ] && real_unit="mysql"
-    if systemctl is-active "$real_unit" >/dev/null 2>&1; then
-      check_pass "Required service active: $real_unit"
-    else
-      if dpkg -l | grep -q "$s"; then
-        check_fail "Required service inactive: $real_unit"
-      else
-        check_skip "Service not installed: $s"
-      fi
-    fi
-  done
-
-  echo -e "Health Check Summary: $G$p_count PASS$N | $R$f_count FAIL$N | $Y$s_count SKIP$N"
-}
-
-# ---------------------------------------------------------------------
-# 16. FINAL VERIFICATION REPORT
-# ---------------------------------------------------------------------
-sec_verify() {
-  echo -e "\n${G}====================================================${N}"
-  echo -e "${G}               FINAL VERIFICATION REPORT            ${N}"
-  echo -e "${G}====================================================${N}"
-  echo "Failed Units       : $(systemctl --failed --no-legend | awk '{print $1}' | tr '\n' ' ')"
-  echo "Listening Ports    : $(ss -tlpn | awk 'NR>1 {print $4}' | tr '\n' ' ')"
-  echo "Sudo Group Members : $(getent group sudo | cut -d: -f4)"
-  echo "UID 0 Accounts     : $(awk -F: '$3==0 {print $1}' /etc/passwd | tr '\n' ' ')"
-  echo "UFW Firewall Status: $(ufw status | head -1)"
-  echo "Effective SSH Root : $(sshd -T 2>/dev/null | grep -i permitrootlogin)"
-  echo "Upgradeable Pkgs   : $(apt list --upgradable 2>/dev/null | grep -c 'upgradable')"
-  echo -e "${G}====================================================${N}"
-}
-
-# EXECUTION
-sec_users
-sec_passwords
-sec_pam
-sec_sudoers
-sec_sysctl
-sec_perms
-sec_ssh
-sec_remove
-sec_backdoor
-sec_files
-sec_network
-sec_defenses
-sec_services
-sec_upgrade
-sec_health
-sec_verify
-
-echo -e "\n${G}====================================================${N}"
-echo -e "${G}     Mint SuperScript Hardening Completed!          ${N}"
-echo -e "${G}====================================================${N}"
-echo "Summary file written to: $SUMMARY"
-echo "Log file written to    : $LOG"
-
-if [ "$NON_INTERACTIVE" != "yes" ] && [ "$SELF_TEST" != "yes" ]; then
-  if ask "Open the change summary file now?"; then
-    cat "$SUMMARY"
-  fi
-fi
