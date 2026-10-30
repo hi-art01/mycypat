@@ -1,3 +1,42 @@
+function Remove-ProhibitedSoftware {
+    $prohibited = @('CCleaner', 'WebCompanion', 'Lavasoft', 'OpenTFTPServer', 'BitTorrent', 'uTorrent', 'Wireshark', 'GooseDesktop', 'Cain', 'Abel')
+    $uninstKeys = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    foreach ($app in $prohibited) {
+        Get-ItemProperty $uninstKeys -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -match $app } | ForEach-Object {
+            if ($script:FAST_MODE -or (Confirm-Prompt "Uninstall prohibited software '$($_.DisplayName)'?")) {
+                $unstr = $_.UninstallString
+                if ($unstr) {
+                    Info "Uninstalling prohibited software: $($_.DisplayName)"
+                    if ($unstr -match 'msiexec') {
+                        $guid = [regex]::Match($unstr, '{[A-F0-9-]+}').Value
+                        if ($guid) { Start-Process msiexec.exe -ArgumentList "/x $guid /qn" -Wait -WindowStyle Hidden }
+                    } else {
+                        Start-Process cmd.exe -ArgumentList "/c $unstr /S /quiet /norestart" -Wait -WindowStyle Hidden
+                    }
+                }
+            }
+        }
+        if (Get-Command Get-Package -ErrorAction SilentlyContinue) {
+            Get-Package -Name "*$app*" -ErrorAction SilentlyContinue | Uninstall-Package -Force -ErrorAction SilentlyContinue
+        }
+    }
+    # Delete leftover directories
+    $targets = @(
+        "$env:ProgramFiles\CCleaner", "$env:ProgramFiles(x86)\CCleaner",
+        "$env:ProgramFiles\Lavasoft", "$env:ProgramFiles(x86)\Lavasoft",
+        "$env:ProgramFiles\OpenTFTPServer", "$env:ProgramFiles(x86)\OpenTFTPServer",
+        "$env:ProgramFiles\Wireshark", "$env:ProgramFiles(x86)\Wireshark",
+        "$env:APPDATA\BitTorrent", "$env:APPDATA\uTorrent"
+    )
+    foreach ($t in $targets) {
+        if (Test-Path $t) { Remove-Item -Path $t -Recurse -Force -ErrorAction SilentlyContinue; Info "Deleted leftover directory: $t" }
+    }
+}
+
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
@@ -366,6 +405,138 @@ if (Confirm-Prompt "Enable full audit logging across all subcategories?") {
     auditpol /set /category:* /success:enable /failure:enable | Out-Null
     if ($LASTEXITCODE -ne 0) { Warn "auditpol failed with status code $LASTEXITCODE" }
     else { Info "Enabled full auditpol logging" }
+
+    # Prevent non-administrators from installing printer drivers
+    Set-RegProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Providers\LanMan Print Services\Servers' 'AddPrinterDrivers' 1
+
+    # Disable AutoAdminLogon and clear cached logon credentials
+    Set-RegProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' 'AutoAdminLogon' '0' 'String'
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultPassword' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultUserName' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultDomainName' -ErrorAction SilentlyContinue | Out-Null
+
+    # Disable OneDrive Startup and Sync Policy
+    Remove-ItemProperty -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Get-ScheduledTask -TaskName '*OneDrive*' -ErrorAction SilentlyContinue | Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+    if (-not (Test-Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive')) { New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' -Force -ErrorAction SilentlyContinue | Out-Null }
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' 'DisableFileSyncNGSC' 1
+    Info "Disabled OneDrive startup entries, scheduled tasks, and sync policy"
+
+    # Windows Event Collector (Wecsvc)
+    Get-Service -Name Wecsvc -ErrorAction SilentlyContinue | Set-Service -StartupType Automatic -Status Running -ErrorAction SilentlyContinue
+    Info "Configured Windows Event Collector (Wecsvc) to Automatic and Running"
+
+    # Prevent non-administrators from installing printer drivers
+    Set-RegProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Providers\LanMan Print Services\Servers' 'AddPrinterDrivers' 1
+
+    # Disable AutoAdminLogon and clear cached logon credentials
+    Set-RegProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' 'AutoAdminLogon' '0' 'String'
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultPassword' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultUserName' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultDomainName' -ErrorAction SilentlyContinue | Out-Null
+
+    # Disable OneDrive Startup and Sync Policy
+    Remove-ItemProperty -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Get-ScheduledTask -TaskName '*OneDrive*' -ErrorAction SilentlyContinue | Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+    if (-not (Test-Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive')) { New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' -Force -ErrorAction SilentlyContinue | Out-Null }
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' 'DisableFileSyncNGSC' 1
+    Info "Disabled OneDrive startup entries, scheduled tasks, and sync policy"
+
+    # Windows Event Collector (Wecsvc)
+    Get-Service -Name Wecsvc -ErrorAction SilentlyContinue | Set-Service -StartupType Automatic -Status Running -ErrorAction SilentlyContinue
+    Info "Configured Windows Event Collector (Wecsvc) to Automatic and Running"
+
+    # Prevent non-administrators from installing printer drivers
+    Set-RegProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Providers\LanMan Print Services\Servers' 'AddPrinterDrivers' 1
+
+    # Disable AutoAdminLogon and clear cached logon credentials
+    Set-RegProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' 'AutoAdminLogon' '0' 'String'
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultPassword' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultUserName' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultDomainName' -ErrorAction SilentlyContinue | Out-Null
+
+    # Disable OneDrive Startup and Sync Policy
+    Remove-ItemProperty -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Get-ScheduledTask -TaskName '*OneDrive*' -ErrorAction SilentlyContinue | Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+    if (-not (Test-Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive')) { New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' -Force -ErrorAction SilentlyContinue | Out-Null }
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' 'DisableFileSyncNGSC' 1
+    Info "Disabled OneDrive startup entries, scheduled tasks, and sync policy"
+
+    # Windows Event Collector (Wecsvc)
+    Get-Service -Name Wecsvc -ErrorAction SilentlyContinue | Set-Service -StartupType Automatic -Status Running -ErrorAction SilentlyContinue
+    Info "Configured Windows Event Collector (Wecsvc) to Automatic and Running"
+
+    # Prevent non-administrators from installing printer drivers
+    Set-RegProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Providers\LanMan Print Services\Servers' 'AddPrinterDrivers' 1
+
+    # Disable AutoAdminLogon and clear cached logon credentials
+    Set-RegProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' 'AutoAdminLogon' '0' 'String'
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultPassword' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultUserName' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultDomainName' -ErrorAction SilentlyContinue | Out-Null
+
+    # Disable OneDrive Startup and Sync Policy
+    Remove-ItemProperty -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Get-ScheduledTask -TaskName '*OneDrive*' -ErrorAction SilentlyContinue | Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+    if (-not (Test-Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive')) { New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' -Force -ErrorAction SilentlyContinue | Out-Null }
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' 'DisableFileSyncNGSC' 1
+    Info "Disabled OneDrive startup entries, scheduled tasks, and sync policy"
+
+    # Windows Event Collector (Wecsvc)
+    Get-Service -Name Wecsvc -ErrorAction SilentlyContinue | Set-Service -StartupType Automatic -Status Running -ErrorAction SilentlyContinue
+    Info "Configured Windows Event Collector (Wecsvc) to Automatic and Running"
+
+    # Prevent non-administrators from installing printer drivers
+    Set-RegProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Providers\LanMan Print Services\Servers' 'AddPrinterDrivers' 1
+
+    # Disable AutoAdminLogon and clear cached logon credentials
+    Set-RegProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' 'AutoAdminLogon' '0' 'String'
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultPassword' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultUserName' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultDomainName' -ErrorAction SilentlyContinue | Out-Null
+
+    # Disable OneDrive Startup and Sync Policy
+    Remove-ItemProperty -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Get-ScheduledTask -TaskName '*OneDrive*' -ErrorAction SilentlyContinue | Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+    if (-not (Test-Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive')) { New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' -Force -ErrorAction SilentlyContinue | Out-Null }
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' 'DisableFileSyncNGSC' 1
+    Info "Disabled OneDrive startup entries, scheduled tasks, and sync policy"
+
+    # Windows Event Collector (Wecsvc)
+    Get-Service -Name Wecsvc -ErrorAction SilentlyContinue | Set-Service -StartupType Automatic -Status Running -ErrorAction SilentlyContinue
+    Info "Configured Windows Event Collector (Wecsvc) to Automatic and Running"
+
+    # Prevent non-administrators from installing printer drivers
+    Set-RegProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Providers\LanMan Print Services\Servers' 'AddPrinterDrivers' 1
+
+    # Disable AutoAdminLogon and clear cached logon credentials
+    Set-RegProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' 'AutoAdminLogon' '0' 'String'
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultPassword' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultUserName' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DefaultDomainName' -ErrorAction SilentlyContinue | Out-Null
+
+    # Disable OneDrive Startup and Sync Policy
+    Remove-ItemProperty -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run' -Name 'OneDrive' -ErrorAction SilentlyContinue | Out-Null
+    Get-ScheduledTask -TaskName '*OneDrive*' -ErrorAction SilentlyContinue | Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+    if (-not (Test-Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive')) { New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' -Force -ErrorAction SilentlyContinue | Out-Null }
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' 'DisableFileSyncNGSC' 1
+    Info "Disabled OneDrive startup entries, scheduled tasks, and sync policy"
+
+    # Windows Event Collector (Wecsvc)
+    Get-Service -Name Wecsvc -ErrorAction SilentlyContinue | Set-Service -StartupType Automatic -Status Running -ErrorAction SilentlyContinue
+    Info "Configured Windows Event Collector (Wecsvc) to Automatic and Running"
     Set-RegProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'SCENoApplyLegacyAuditPolicy' 1
 }
 
@@ -752,6 +923,114 @@ user_pref("browser.contentblocking.category", "strict");
     }
 
     # Attempt winget / choco upgrades
+
+    # 7-Zip & LibreOffice Version Audit and Upgrade Helper
+    $installedApps = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName }
+    $sevenZip = $installedApps | Where-Object { $_.DisplayName -match '7-Zip' }
+    $libreOffice = $installedApps | Where-Object { $_.DisplayName -match 'LibreOffice' }
+
+    if ($sevenZip) { Info "Found 7-Zip Version: $($sevenZip.DisplayVersion)" }
+    if ($libreOffice) { Info "Found LibreOffice Version: $($libreOffice.DisplayVersion)" }
+
+
+    # 7-Zip & LibreOffice Version Audit and Upgrade Helper
+    $installedApps = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName }
+    $sevenZip = $installedApps | Where-Object { $_.DisplayName -match '7-Zip' }
+    $libreOffice = $installedApps | Where-Object { $_.DisplayName -match 'LibreOffice' }
+
+    if ($sevenZip) { Info "Found 7-Zip Version: $($sevenZip.DisplayVersion)" }
+    if ($libreOffice) { Info "Found LibreOffice Version: $($libreOffice.DisplayVersion)" }
+
+
+    # 7-Zip & LibreOffice Version Audit and Upgrade Helper
+    $installedApps = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName }
+    $sevenZip = $installedApps | Where-Object { $_.DisplayName -match '7-Zip' }
+    $libreOffice = $installedApps | Where-Object { $_.DisplayName -match 'LibreOffice' }
+
+    if ($sevenZip) { Info "Found 7-Zip Version: $($sevenZip.DisplayVersion)" }
+    if ($libreOffice) { Info "Found LibreOffice Version: $($libreOffice.DisplayVersion)" }
+
+
+    # 7-Zip & LibreOffice Version Audit and Upgrade Helper
+    $installedApps = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName }
+    $sevenZip = $installedApps | Where-Object { $_.DisplayName -match '7-Zip' }
+    $libreOffice = $installedApps | Where-Object { $_.DisplayName -match 'LibreOffice' }
+
+    if ($sevenZip) { Info "Found 7-Zip Version: $($sevenZip.DisplayVersion)" }
+    if ($libreOffice) { Info "Found LibreOffice Version: $($libreOffice.DisplayVersion)" }
+
+
+    # 7-Zip & LibreOffice Version Audit and Upgrade Helper
+    $installedApps = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName }
+    $sevenZip = $installedApps | Where-Object { $_.DisplayName -match '7-Zip' }
+    $libreOffice = $installedApps | Where-Object { $_.DisplayName -match 'LibreOffice' }
+
+    if ($sevenZip) { Info "Found 7-Zip Version: $($sevenZip.DisplayVersion)" }
+    if ($libreOffice) { Info "Found LibreOffice Version: $($libreOffice.DisplayVersion)" }
+
+
+    # 7-Zip & LibreOffice Version Audit and Upgrade Helper
+    $installedApps = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName }
+    $sevenZip = $installedApps | Where-Object { $_.DisplayName -match '7-Zip' }
+    $libreOffice = $installedApps | Where-Object { $_.DisplayName -match 'LibreOffice' }
+
+    if ($sevenZip) { Info "Found 7-Zip Version: $($sevenZip.DisplayVersion)" }
+    if ($libreOffice) { Info "Found LibreOffice Version: $($libreOffice.DisplayVersion)" }
+
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        if ($sevenZip) { winget upgrade --id 7zip.7zip --exact --accept-source-agreements --accept-package-agreements; if ($LASTEXITCODE -eq 0) { Info "Upgraded 7-Zip via winget" } }
+        if ($libreOffice) { winget upgrade --id TheDocumentFoundation.LibreOffice --exact --accept-source-agreements --accept-package-agreements; if ($LASTEXITCODE -eq 0) { Info "Upgraded LibreOffice via winget" } }
+    } elif (Get-Command choco -ErrorAction SilentlyContinue) {
+        if ($sevenZip) { choco upgrade 7zip -y; if ($LASTEXITCODE -eq 0) { Info "Upgraded 7-Zip via Chocolatey" } }
+        if ($libreOffice) { choco upgrade libreoffice-fresh -y; if ($LASTEXITCODE -eq 0) { Info "Upgraded LibreOffice via Chocolatey" } }
+    } else {
+        if ($sevenZip -or $libreOffice) { Warn "winget/choco not available. Please inspect and upgrade 7-Zip / LibreOffice manually if outdated." }
+    }
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        if ($sevenZip) { winget upgrade --id 7zip.7zip --exact --accept-source-agreements --accept-package-agreements; if ($LASTEXITCODE -eq 0) { Info "Upgraded 7-Zip via winget" } }
+        if ($libreOffice) { winget upgrade --id TheDocumentFoundation.LibreOffice --exact --accept-source-agreements --accept-package-agreements; if ($LASTEXITCODE -eq 0) { Info "Upgraded LibreOffice via winget" } }
+    } elif (Get-Command choco -ErrorAction SilentlyContinue) {
+        if ($sevenZip) { choco upgrade 7zip -y; if ($LASTEXITCODE -eq 0) { Info "Upgraded 7-Zip via Chocolatey" } }
+        if ($libreOffice) { choco upgrade libreoffice-fresh -y; if ($LASTEXITCODE -eq 0) { Info "Upgraded LibreOffice via Chocolatey" } }
+    } else {
+        if ($sevenZip -or $libreOffice) { Warn "winget/choco not available. Please inspect and upgrade 7-Zip / LibreOffice manually if outdated." }
+    }
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        if ($sevenZip) { winget upgrade --id 7zip.7zip --exact --accept-source-agreements --accept-package-agreements; if ($LASTEXITCODE -eq 0) { Info "Upgraded 7-Zip via winget" } }
+        if ($libreOffice) { winget upgrade --id TheDocumentFoundation.LibreOffice --exact --accept-source-agreements --accept-package-agreements; if ($LASTEXITCODE -eq 0) { Info "Upgraded LibreOffice via winget" } }
+    } elif (Get-Command choco -ErrorAction SilentlyContinue) {
+        if ($sevenZip) { choco upgrade 7zip -y; if ($LASTEXITCODE -eq 0) { Info "Upgraded 7-Zip via Chocolatey" } }
+        if ($libreOffice) { choco upgrade libreoffice-fresh -y; if ($LASTEXITCODE -eq 0) { Info "Upgraded LibreOffice via Chocolatey" } }
+    } else {
+        if ($sevenZip -or $libreOffice) { Warn "winget/choco not available. Please inspect and upgrade 7-Zip / LibreOffice manually if outdated." }
+    }
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        if ($sevenZip) { winget upgrade --id 7zip.7zip --exact --accept-source-agreements --accept-package-agreements; if ($LASTEXITCODE -eq 0) { Info "Upgraded 7-Zip via winget" } }
+        if ($libreOffice) { winget upgrade --id TheDocumentFoundation.LibreOffice --exact --accept-source-agreements --accept-package-agreements; if ($LASTEXITCODE -eq 0) { Info "Upgraded LibreOffice via winget" } }
+    } elif (Get-Command choco -ErrorAction SilentlyContinue) {
+        if ($sevenZip) { choco upgrade 7zip -y; if ($LASTEXITCODE -eq 0) { Info "Upgraded 7-Zip via Chocolatey" } }
+        if ($libreOffice) { choco upgrade libreoffice-fresh -y; if ($LASTEXITCODE -eq 0) { Info "Upgraded LibreOffice via Chocolatey" } }
+    } else {
+        if ($sevenZip -or $libreOffice) { Warn "winget/choco not available. Please inspect and upgrade 7-Zip / LibreOffice manually if outdated." }
+    }
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        if ($sevenZip) { winget upgrade --id 7zip.7zip --exact --accept-source-agreements --accept-package-agreements; if ($LASTEXITCODE -eq 0) { Info "Upgraded 7-Zip via winget" } }
+        if ($libreOffice) { winget upgrade --id TheDocumentFoundation.LibreOffice --exact --accept-source-agreements --accept-package-agreements; if ($LASTEXITCODE -eq 0) { Info "Upgraded LibreOffice via winget" } }
+    } elif (Get-Command choco -ErrorAction SilentlyContinue) {
+        if ($sevenZip) { choco upgrade 7zip -y; if ($LASTEXITCODE -eq 0) { Info "Upgraded 7-Zip via Chocolatey" } }
+        if ($libreOffice) { choco upgrade libreoffice-fresh -y; if ($LASTEXITCODE -eq 0) { Info "Upgraded LibreOffice via Chocolatey" } }
+    } else {
+        if ($sevenZip -or $libreOffice) { Warn "winget/choco not available. Please inspect and upgrade 7-Zip / LibreOffice manually if outdated." }
+    }
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        if ($sevenZip) { winget upgrade --id 7zip.7zip --exact --accept-source-agreements --accept-package-agreements; if ($LASTEXITCODE -eq 0) { Info "Upgraded 7-Zip via winget" } }
+        if ($libreOffice) { winget upgrade --id TheDocumentFoundation.LibreOffice --exact --accept-source-agreements --accept-package-agreements; if ($LASTEXITCODE -eq 0) { Info "Upgraded LibreOffice via winget" } }
+    } elif (Get-Command choco -ErrorAction SilentlyContinue) {
+        if ($sevenZip) { choco upgrade 7zip -y; if ($LASTEXITCODE -eq 0) { Info "Upgraded 7-Zip via Chocolatey" } }
+        if ($libreOffice) { choco upgrade libreoffice-fresh -y; if ($LASTEXITCODE -eq 0) { Info "Upgraded LibreOffice via Chocolatey" } }
+    } else {
+        if ($sevenZip -or $libreOffice) { Warn "winget/choco not available. Please inspect and upgrade 7-Zip / LibreOffice manually if outdated." }
+    }
     if (Get-Command winget -ErrorAction SilentlyContinue) {
         winget upgrade --all --silent --accept-source-agreements --accept-package-agreements --include-unknown *> $null
     } elseif (Get-Command choco -ErrorAction SilentlyContinue) {
