@@ -1,8 +1,8 @@
 # CyberPatriot Hardening Suite & Guides (CP19 / 2026 Edition)
 
-Welcome to the **CyberPatriot Hardening Suite**. This repository contains five OS-specific, interactive hardening scripts designed to achieve **85–100 points** in CyberPatriot competition rounds with maximum speed, accuracy, and compliance with image-specific README requirements.
+Welcome to the **CyberPatriot Hardening Suite**. This repository contains OS-specific hardening scripts that automate common security controls while allowing image-specific requirements to be supplied at run time. They are a baseline, not a guarantee of any competition score or a universal fit for every image.
 
-> **Note on Operating System Compatibility**: The scripts in this repository are developed and tested specifically for **Ubuntu 20.04 / 22.04 / 24.04 LTS**, **Linux Mint 20 / 21**, **Debian 11 (Bullseye) / 12 (Bookworm)**, **Windows 10 / 11 Workstations**, and **Windows Server 2016 / 2019 / 2022**.
+> **Compatibility and image-specific requirements**: The scripts target only the OS families and versions listed below; they are not intended for every CyberPatriot image or arbitrary Linux distribution. The Debian answer key was used as a source of general hardening ideas only. Image-specific usernames, passwords, forensic answers, and scenario values are not built into the scripts. Before each run, read that image's instructions and identify the authorized users/admins, required services and ports, prohibited software, and any controls that must remain unchanged. Prefer the interactive run and review the summary; `-y`/`--yes` runs modules without their individual confirmation prompts and should only be used after supplying and checking the correct scenario values.
 
 ---
 
