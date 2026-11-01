@@ -1530,13 +1530,13 @@ sec_network() {
       fi
     fi
 
-    # Strict /etc/hosts Cleaning
+    # Keep the active hostname resolvable locally for sudo and system services.
     hosts_tmp=$(mktemp)
-    sys_host=$(hostname)
+    sys_host=$(hostname -s 2>/dev/null)
+    [ -n "$sys_host" ] || sys_host=$(cat /etc/hostname 2>/dev/null)
     awk -v h="$sys_host" '
     BEGIN {
       ok["127.0.0.1 localhost"] = 1
-      ok["127.0.1.1 " h] = 1
       ok["::1 ip6-localhost ip6-loopback"] = 1
       ok["fe00::0 ip6-localnet"] = 1
       ok["ff00::0 ip6-mcastprefix"] = 1
@@ -1549,11 +1549,29 @@ sec_network() {
       line = $0
       sub(/^[[:space:]]+/, "", line)
       sub(/[[:space:]]+$/, "", line)
-      if (line in ok) print $0
+      if (line in ok) {
+        print $0
+        next
+      }
+      if ($1 == "127.0.1.1") {
+        for (i = 2; i <= NF; i++) {
+          if ($i == h) {
+            print $0
+            found_host = 1
+            break
+          }
+        }
+      }
     }
+    END { if (!found_host && h != "") print "127.0.1.1 " h }
     ' /etc/hosts > "$hosts_tmp"
-    cp "$hosts_tmp" /etc/hosts && rm -f "$hosts_tmp"
-    log "Cleaned /etc/hosts strictly to default loopback and local hostname entries"
+    if cp "$hosts_tmp" /etc/hosts; then
+      rm -f "$hosts_tmp"
+      log "Cleaned /etc/hosts and verified local hostname mapping: $sys_host"
+    else
+      rm -f "$hosts_tmp"
+      warn "Could not update /etc/hosts; retained the existing file"
+    fi
 
     # /etc/resolv.conf
     if [ ! -L /etc/resolv.conf ]; then

@@ -110,6 +110,32 @@ Copy-Item .\WindowsServerSuperScript .\WindowsServerSuperScript.ps1
 
 ---
 
+## 🐧 Linux Module Guide
+
+The following guide applies to `DebianSuperScript`, `UbuntuSuperScript`, and `MintSuperScript`. Module numbers are the same in all three scripts. Step 0 gathers scenario-specific information before the modules run.
+
+| Module | What it does |
+| :--- | :--- |
+| **1. User Accounts & Groups** | Reviews local accounts and administrator privileges. In interactive mode, asks separately whether to delete each account and whether to remove admin privileges; both default to **No**. It can add a space- or comma-separated list of users, apply requested `user:group` memberships, and lock empty-password accounts. Non-interactive account deletion requires an explicit `--users` list. |
+| **2. Password Security & Aging** | Applies password aging settings to local accounts and prompts for new passwords only for selected accounts. Non-interactive resets use `--reset-password-users` and `--password`; no built-in default password is used. |
+| **3. PAM, Login Policy & `su` Restriction** | Sets password length/complexity and history, configures failed-login lockout where supported, removes password `nullok` options, and limits `su` access to the administrative group. |
+| **4. Sudoers & Privilege Delegation** | Audits `/etc/sudoers` and its drop-ins, removes `NOPASSWD` and `!authenticate`, comments out unauthorized broad `ALL` grants, validates syntax with `visudo`, and enables sudo session logging and pseudo-terminal use. **This module does not configure IPv4.** |
+| **5. Sysctl Kernel Network Hardening** | Configures kernel network and process protections. This is where **IPv4 TCP SYN cookies are enabled** (`net.ipv4.tcp_syncookies=1`) and **IPv4 forwarding is disabled** (`net.ipv4.ip_forward=0`), alongside IPv4/IPv6 redirect and source-route protections, address randomization, and core-dump protections. It applies the settings and verifies the two requested IPv4 values. |
+| **6. File Permissions & Home Directories** | Tightens permissions on account, sudo, cron, SSH, and GRUB files; sanitizes risky GRUB boot parameters; restricts home-directory access; removes world-writable permissions where appropriate; and records SUID files and file capabilities for review. |
+| **7. SSH Server Hardening & Authorized Keys** | If SSH is installed, audits authorized key files and hardens the SSH daemon (for example, disables root/empty-password login and X11 forwarding, limits authentication attempts, and optionally restricts logins to configured users). It validates the configuration and rolls it back if `sshd -t` fails. |
+| **8. Prohibited Software & Service Removal** | Finds configured prohibited tools and unrequired server packages, checks whether removal would affect protected or required software, and purges candidates that pass the dependency guard. Required services/packages can be declared in setup prompts. |
+| **9. Backdoor & Persistence Sweep** | Checks for netcat/socat processes, suspicious cron and systemd persistence entries, and executables or command patterns associated with persistence. Suspicious findings are surfaced for review; package-owned system files are protected from automatic cleanup. |
+| **10. Prohibited Media & Archive Search** | Searches selected non-system locations for prohibited media, torrents, archives, and installers, preserving README/forensics files and protected application/service paths. Review the competition image’s rules before approving deletion. |
+| **11. APT Sources, Hosts, DNS & UFW Firewall** | Filters package sources to the distribution’s configured official repositories, checks repository signatures, preserves the active machine hostname in `/etc/hosts`, configures DNS, and installs/configures UFW with deny-incoming/allow-outgoing defaults and requested ports. It enables UFW and checks that its status is active. **Review custom repositories, DNS requirements, SSH access, and required ports before accepting these changes.** |
+| **12. Rootkit & Malware Scanners** | Optionally installs/runs `rkhunter`, `chkrootkit`, and ClamAV scans with timeouts. Results are logged for review; scanner findings are report-only and are not automatically treated as proof of infection. |
+| **13. Required Service Hardening** | Applies configuration hardening only to services identified as required (Apache, Nginx, FTP, Samba, MySQL/MariaDB, or PHP). It uses service-specific configuration checks and restores backups when validation fails. |
+| **14. Defenses, Logging & Access Controls** | Enables or configures AppArmor, auditd rules, fail2ban, and rsyslog where available; disables desktop guest/automatic login; blocks selected removable-storage/expansion modules; masks Ctrl-Alt-Del reboot; disables core dumps; and preserves VM guest integration services. |
+| **15. Package Upgrades & Security Updates** | Refreshes APT metadata, installs available package/security updates, performs a distribution upgrade, protects important packages during guarded autoremove, configures unattended upgrades, and targets installed Chromium and OpenSSH packages for updates. Ubuntu/Mint also refresh Chromium via Snap when installed; Mint configures Update Manager automatic updates. Update success depends on network and repository availability and is reported in the log. |
+| **16. Post-Run System Health Check** | Checks required services and ports, SSH and sudoers syntax, configured users/admins, and whether UFW is active; reports pass/fail/skip results. |
+| **17. Final System Verification Report** | Reports failed systemd units, listening ports, administrator/UID-0 accounts, IPv4 SYN-cookie/forwarding values, UFW status, effective SSH settings, remaining upgradable packages, and whether a reboot is pending. |
+
+---
+
 ## 🛡️ Feature & Capability Matrix
 
 | Feature / Hardening Control | `UbuntuSuperScript` | `MintSuperScript` | `DebianSuperScript` | `WindowsSuperScript` | `WindowsServerSuperScript` |
