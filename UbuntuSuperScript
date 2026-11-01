@@ -18,6 +18,25 @@ log()  { echo -e "${G}[+]${N} $1"; { echo "$(date +%T) [INFO] $1" >> "$LOG"; } 2
 warn() { echo -e "${Y}[! WARN]${N} $1"; { echo "$(date +%T) [WARN] $1" >> "$LOG"; } 2>/dev/null || true; }
 err()  { echo -e "${R}[ERROR]${N} $1"; { echo "$(date +%T) [ERROR] $1" >> "$LOG"; } 2>/dev/null || true; }
 
+refresh_apt_metadata() {
+  local output rc
+  if output=$(DEBIAN_FRONTEND=noninteractive apt-get update 2>&1); then
+    printf '%s\n' "$output" >> "$LOG"
+    if printf '%s\n' "$output" | grep -Eqi 'Failed to fetch|Some index files failed|NO_PUBKEY|not signed|signatures were invalid|does not have a Release file'; then
+      warn "APT metadata refresh reported repository errors; see $LOG"
+      printf '%s\n' "$output" | grep -Ei 'Failed to fetch|Some index files failed|NO_PUBKEY|not signed|signatures were invalid|does not have a Release file' | tail -n 10 | sed 's/^/    /'
+      return 1
+    fi
+    return 0
+  else
+    rc=$?
+    printf '%s\n' "$output" >> "$LOG"
+    warn "APT metadata refresh failed (exit $rc); see $LOG"
+    printf '%s\n' "$output" | tail -n 10 | sed 's/^/    /'
+    return "$rc"
+  fi
+}
+
 ask() {
   local prompt="$1"
   local default="${2:-Y}"
@@ -1511,23 +1530,6 @@ sec_network() {
     done
     rm -f "$enabled_keyrings"
 
-    # Real Apt Update check for NO_PUBKEY errors
-    if [ "$SELF_TEST" = "yes" ]; then
-      log "skipped: no network in self-test"
-    else
-      if apt_out=$(apt-get update 2>&1); then
-        if echo "$apt_out" | grep -qE "NO_PUBKEY|not signed|signatures were invalid"; then
-          warn "APT update detected repository key/signature issue:"
-          echo "$apt_out" | grep -E "NO_PUBKEY|not signed|signatures were invalid" | sed 's/^/    /'
-        else
-          log "APT repository signature check completed cleanly"
-        fi
-      else
-        warn "APT metadata refresh failed before firewall setup; see $LOG"
-        echo "$apt_out" | tail -n 10 | sed 's/^/    /'
-      fi
-    fi
-
     # Keep the active hostname resolvable locally for sudo and system services.
     hosts_tmp=$(mktemp)
     sys_host=$(hostname -s 2>/dev/null)
@@ -1608,7 +1610,7 @@ sec_network() {
     fi
 
     # UFW Firewall Pruning
-    if ! DEBIAN_FRONTEND=noninteractive apt-get update >> "$LOG" 2>&1; then
+    if ! refresh_apt_metadata; then
       warn "APT metadata refresh failed before UFW installation; attempting installation with available package metadata"
     fi
     if ! $APT install ufw >> "$LOG" 2>&1 || ! command -v ufw >/dev/null 2>&1; then
@@ -2095,13 +2097,10 @@ sec_upgrade() {
   fi
   if [ "$ALL_MODULES" = "yes" ] || ask_timed "Perform package updates, dist-upgrade, guarded autoremove, and unattended-upgrades?" "Y"; then
     local has_net="no"
-    if ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 || ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+    log "Refreshing APT metadata to check repository access..."
+    if refresh_apt_metadata; then
       has_net="yes"
-    fi
-
-    if [ "$has_net" = "yes" ]; then
-      log "Running apt-get update and upgrade..."
-      if DEBIAN_FRONTEND=noninteractive apt-get update >> "$LOG" 2>&1; then
+      log "Installing all available package upgrades, including security updates..."
         if DEBIAN_FRONTEND=noninteractive apt-get upgrade -y >> "$LOG" 2>&1; then
           log "Completed apt-get upgrade"
         else
@@ -2132,6 +2131,13 @@ sec_upgrade() {
         fi
         upgrade_installed_package openssh-server
         upgrade_installed_package openssh-client
+        if command -v flatpak >/dev/null 2>&1 && flatpak list --app --columns=application 2>/dev/null | grep -Fxq "org.chromium.Chromium"; then
+          if flatpak update --noninteractive org.chromium.Chromium >> "$LOG" 2>&1; then
+            log "Updated Chromium Flatpak"
+          else
+            warn "Failed to update Chromium Flatpak; see $LOG"
+          fi
+        fi
 
         local chromium_installed="no" openssh_installed="no" package_status
         if command -v snap >/dev/null 2>&1 && snap list chromium >/dev/null 2>&1; then
@@ -2149,6 +2155,9 @@ sec_upgrade() {
         package_status=$(dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null || true)
         [[ "$package_status" == ii* ]] && chromium_installed="yes"
       done
+      if command -v flatpak >/dev/null 2>&1 && flatpak list --app --columns=application 2>/dev/null | grep -Fxq "org.chromium.Chromium"; then
+        chromium_installed="yes"
+      fi
       if [ "$chromium_installed" = "no" ]; then
         warn "Chromium is not installed as an APT package or snap; no Chromium update was applied"
       fi
@@ -2183,10 +2192,7 @@ sec_upgrade() {
       fi
 
       else
-      warn "apt-get update failed; package upgrades were skipped; see $LOG"
-      fi
-    else
-      warn "No network connectivity detected; skipping live apt upgrades"
+      warn "APT metadata could not be refreshed; package/security upgrades were skipped to avoid using stale repository indexes"
     fi
 
     # Unattended-upgrades configuration
