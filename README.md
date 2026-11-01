@@ -134,6 +134,105 @@ The following guide applies to `DebianSuperScript`, `UbuntuSuperScript`, and `Mi
 | **16. Post-Run System Health Check** | Checks required services and ports, SSH and sudoers syntax, configured users/admins, and whether UFW is active; reports pass/fail/skip results. |
 | **17. Final System Verification Report** | Reports failed systemd units, listening ports, administrator/UID-0 accounts, IPv4 SYN-cookie/forwarding values, UFW status, effective SSH settings, remaining upgradable packages, and whether a reboot is pending. |
 
+## 🧰 Manual Debian/Ubuntu/Mint Updates and UFW
+
+Use these steps if Module 11 or Module 15 cannot update packages or enable UFW in the VM. They are manual alternatives for the Debian-family images supported by the Linux scripts; they are not commands to run blindly on every CyberPatriot image. Complete the image's forensics questions first, read its desktop README, and confirm the OS and required services/ports before changing anything.
+
+### 1. Check the OS and package repositories
+
+```bash
+cat /etc/os-release
+```
+
+APT needs working network access and valid repositories for the installed OS release. The attached Debian 12 answer key shows Debian Bookworm repository examples, but **do not replace `/etc/apt/sources.list` with those lines unless the VM is actually Debian 12**. Ubuntu uses Ubuntu release repositories; Linux Mint uses Mint repositories together with repositories for its Ubuntu base. Newer images may store repositories in `.sources` files under `/etc/apt/sources.list.d/`.
+
+Inspect the configured sources and refresh the package lists:
+
+```bash
+grep -RhsE '^[[:space:]]*(deb[[:space:]]|URIs:|Suites:|Components:)' \
+  /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null
+sudo apt update
+```
+
+Read the complete `apt update` output. Resolve DNS/network problems, incorrect release names, disabled security repositories, expired signing keys, or other reported repository errors before proceeding. Do not ignore signature errors or mix Debian, Ubuntu, and Mint repositories.
+
+### 2. Install available security and other package updates
+
+```bash
+sudo apt upgrade
+```
+
+Review APT's proposed changes and confirm when ready. This installs available updates from the enabled repositories, including security updates when the correct security repository is configured. If APT reports packages kept back, inspect the proposed changes before considering:
+
+```bash
+sudo apt full-upgrade
+```
+
+`full-upgrade` may remove packages to resolve dependencies; do not approve removals that conflict with the image README or required services. If `apt update` failed, fix that first—an upgrade cannot retrieve current updates from broken or stale repository metadata.
+
+### 3. Update Chromium and OpenSSH if installed
+
+First check which Chromium delivery method and packages are present:
+
+```bash
+dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\n' chromium chromium-browser 2>/dev/null
+```
+
+Use the update command that matches the installed Chromium:
+
+```bash
+# Debian/Ubuntu/Mint APT package (run only for a package shown as installed)
+sudo apt install --only-upgrade chromium
+sudo apt install --only-upgrade chromium-browser
+
+# Chromium Snap (common on Ubuntu and some Mint images)
+sudo snap refresh chromium
+
+# Chromium Flatpak (only if this application is installed as a Flatpak)
+sudo flatpak update org.chromium.Chromium
+```
+
+An error such as “package is not installed” or “snap not found” means that command does not match the image's installation method; do not install Chromium solely to clear the error. Check `snap list chromium` or `flatpak list --app` to identify the installed source. Keep Chromium if the image README names it as the required browser.
+
+Update the installed OpenSSH packages from APT:
+
+```bash
+sudo apt install --only-upgrade openssh-server openssh-client
+```
+
+If either package is not installed, rerun the command with only the installed package name. Review prompts about replacing SSH configuration before answering; keeping the local configuration is usually safer for preserving the image's required SSH access. You can check installed versions with:
+
+```bash
+ssh -V
+dpkg-query -W -f='${Version}\n' openssh-server openssh-client 2>/dev/null
+```
+
+### 4. Install and enable UFW
+
+Check the image README and listening services first. If SSH access is required, add its actual port **before** enabling the firewall; the common default is `22/tcp`. Add every other required service port as well.
+
+```bash
+sudo apt update
+sudo apt install ufw
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow 22/tcp       # only if SSH is required on port 22
+sudo ufw enable
+sudo ufw status verbose
+```
+
+Run an additional `sudo ufw allow <port>/<protocol>` for each required port (for example, `80/tcp` for a required HTTP service). Do not use the example port list without checking the image instructions. Enabling UFW can disconnect a remote session or block required services; use the VM console where possible, and verify the final status says `Status: active` and the required ports are allowed.
+
+### 5. Confirm the result
+
+```bash
+sudo apt update
+apt list --upgradable
+sudo ufw status verbose
+```
+
+An empty upgradable-package list means APT currently reports no upgrades from the configured repositories; it does not prove that the correct repositories are configured. If a command fails, keep its full error output and check the matching script log in `/var/log/cp_debian_hardening.log`, `/var/log/cp_ubuntu_hardening.log`, or `/var/log/cp_mint_hardening.log`.
+
 ---
 
 ## 🛡️ Feature & Capability Matrix
