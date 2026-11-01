@@ -552,7 +552,7 @@ if [ "$NON_INTERACTIVE" != "yes" ] && [ "$SELF_TEST" != "yes" ]; then
   MIN_DAYS="${MIN_DAYS:-7}"
   WARN_DAYS="${WARN_DAYS:-14}"
 
-  read -rp "Run in FAST MODE (Bulk silent remediation without item prompts)? [Y/n]: " fm_in </dev/tty
+  read -rp "Use FAST MODE (timed section prompts; account decisions are still asked individually)? [Y/n]: " fm_in </dev/tty
   [[ "${fm_in:-Y}" =~ ^[Yy] ]] && FAST_MODE="yes" || FAST_MODE="no"
 
   read -rp "Run ALL modules automatically without section prompts? [y/N]: " all_in </dev/tty
@@ -792,6 +792,11 @@ sec_users() {
         fi
 
         AUTHORIZED_USERS="$AUTHORIZED_USERS $u"
+        if [ "$uid" -eq 0 ]; then
+          ADMIN_USERS="$ADMIN_USERS $u"
+          warn "Retaining non-root UID 0 account '$u' as an administrator; its UID cannot be safely demoted automatically"
+          continue
+        fi
         if [ "$is_admin" = "yes" ]; then
           if ask_account_action "Remove administrator privileges from '$u'?"; then
             demote_users="$demote_users $u"
@@ -2319,16 +2324,33 @@ sec_verify() {
     echo -e "  [ ${R}FAIL${N} ] Unauthorized UID 0 superuser accounts present: $uid_zeros"
   fi
 
-  # 5. UFW status
+  # 5. IPv4 network hardening
+  echo -e "\n${G}[*] IPv4 Kernel Network Settings:${N}"
+  if command -v sysctl >/dev/null 2>&1; then
+    local syncookies forwarding
+    syncookies=$(sysctl -n net.ipv4.tcp_syncookies 2>/dev/null)
+    forwarding=$(sysctl -n net.ipv4.ip_forward 2>/dev/null)
+    echo "  tcp_syncookies=$syncookies ip_forward=$forwarding"
+    if [ "$syncookies" = "1" ] && [ "$forwarding" = "0" ]; then
+      echo -e "  [ ${G}PASS${N} ] SYN cookies enabled and IPv4 forwarding disabled"
+    else
+      echo -e "  [ ${R}FAIL${N} ] IPv4 network settings do not match the hardening policy"
+    fi
+  else
+    echo -e "  [ ${Y}SKIP${N} ] sysctl command not found"
+  fi
+
+  # 6. UFW status
   echo -e "\n${G}[*] Firewall (UFW) Status & Rules:${N}"
-  if command -v ufw >/dev/null 2>&1; then
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
     ufw status verbose 2>/dev/null || true
     echo -e "  [ ${G}PASS${N} ] Captured UFW active ruleset"
   else
-    echo -e "  [ ${Y}SKIP${N} ] UFW not installed"
+    command -v ufw >/dev/null 2>&1 && ufw status verbose 2>/dev/null || true
+    echo -e "  [ ${R}FAIL${N} ] UFW inactive or not installed"
   fi
 
-  # 6. Effective sshd -T values
+  # 7. Effective sshd -T values
   echo -e "\n${G}[*] Effective SSH Server Configurations (sshd -T):${N}"
   if command -v sshd >/dev/null 2>&1; then
     sshd -T 2>/dev/null | grep -E '^(permitrootlogin|protocol|passwordauthentication|x11forwarding|maxauthtries|clientaliveinterval|allowusers)' || true
@@ -2337,7 +2359,7 @@ sec_verify() {
     echo -e "  [ ${Y}SKIP${N} ] SSH server not installed"
   fi
 
-  # 7. Upgradable packages
+  # 8. Upgradable packages
   echo -e "\n${G}[*] Remaining Upgradable Packages:${N}"
   if command -v apt >/dev/null 2>&1; then
     local up_pkgs
@@ -2351,6 +2373,15 @@ sec_verify() {
     fi
   else
     echo -e "  [ ${Y}SKIP${N} ] apt package manager unavailable"
+  fi
+
+  # 9. Pending reboot
+  echo -e "\n${G}[*] Reboot Status:${N}"
+  if [ -e /var/run/reboot-required ]; then
+    echo -e "  [ ${Y}NOTE${N} ] A reboot is required to complete updates"
+    [ -r /var/run/reboot-required.pkgs ] && cat /var/run/reboot-required.pkgs
+  else
+    echo -e "  [ ${G}PASS${N} ] No pending reboot is reported"
   fi
 }
 
