@@ -403,7 +403,7 @@ SeIncreaseBasePriorityPrivilege = *S-1-5-32-544
 SeLoadDriverPrivilege = *S-1-5-32-544
 SeSecurityPrivilege = *S-1-5-32-544
 SeBatchLogonRight = *S-1-5-32-544
-SeServiceLogonRight = *S-1-5-32-544
+SeServiceLogonRight = *S-1-5-32-544,*S-1-5-19,*S-1-5-20
 SeSystemEnvironmentPrivilege = *S-1-5-32-544
 SeManageVolumePrivilege = *S-1-5-32-544
 SeProfileSingleProcessPrivilege = *S-1-5-32-544
@@ -728,9 +728,10 @@ if (Confirm-Prompt "Sweep IFEO debugger hijacks, WMI subscriptions, Scheduled Ta
         }
     }
 
-    # Auto-start Services with Suspicious Paths
+    # Auto-start Services with Suspicious Paths (Protect critical VM and snapshot integration services)
+    $VMServices = @('VSS','swprv','VMTools','VGAuthService','VBoxService','vmicvss','vmicguestinterface','vmicheartbeat','vmicshutdown','vmictimesync','vmicvmsession','vmicrdv','vmickvpexchange')
     Get-CimInstance Win32_Service | Where-Object { $_.StartMode -eq 'Auto' -and $_.PathName -match '\\Users\\|\\Temp\\|AppData' } | ForEach-Object {
-        if ($_.Name -notin $KeepServices) {
+        if ($_.Name -notin $KeepServices -and $_.Name -notin $VMServices) {
             Set-Service -Name $_.Name -StartupType Disabled -ErrorAction SilentlyContinue
             Stop-Service -Name $_.Name -Force -ErrorAction SilentlyContinue
             Info "Disabled auto-start service with suspicious image path: $($_.Name) ($($_.PathName))"
@@ -861,6 +862,21 @@ if (Confirm-Prompt "Disable unauthorized services and server features?") {
         if (-not $FTPRequired) { $srvFeatures += 'Web-Ftp-Server' }
         foreach ($f in $srvFeatures) {
             Uninstall-WindowsFeature -Name $f -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+
+    # Ensure Volume Shadow Copy (VSS) and VM integration services are healthy for VM snapshots
+    Get-Service -Name VSS, swprv -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($_.StartType -eq 'Disabled') {
+            Set-Service -Name $_.Name -StartupType Manual -ErrorAction SilentlyContinue
+            Info "Restored Volume Shadow Copy snapshot service $($_.Name) to Manual startup"
+        }
+    }
+    Get-Service -Name VMTools, VGAuthService, VBoxService -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($_.Status -ne 'Running') {
+            Set-Service -Name $_.Name -StartupType Automatic -ErrorAction SilentlyContinue
+            Start-Service -Name $_.Name -ErrorAction SilentlyContinue
+            Info "Ensured VM guest tools service $($_.Name) is running"
         }
     }
 }

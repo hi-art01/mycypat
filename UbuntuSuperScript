@@ -73,6 +73,10 @@ inlist() {
 
 is_kept_family() {
   local p="$1"
+  # Protect VM guest tools, kernel images, and hypervisor drivers
+  if [[ "$p" =~ ^(open-vm-tools|virtualbox-guest|qemu-guest|hyperv-|linux-image|linux-headers|systemd) ]]; then
+    return 0
+  fi
   for kf in $KEPT_FAMILIES $KEEP_SERVICES $REQUIRED_SOFTWARE; do
     # shellcheck disable=SC2053
     if [[ "$p" == $kf ]]; then return 0; fi
@@ -626,7 +630,7 @@ if [ "$SELF_TEST" = "yes" ]; then
           removed_deps=$(echo "$sim_out" | grep -E "^Remv " | awk '{print $2}')
           blocked="no"
           for dep in $removed_deps; do
-            if is_kept_pkg "$dep" || [[ "$dep" =~ ^(ssh|openssh|ufw|sudo|apparmor|auditd|libpam-|network-manager|ubuntu-desktop|ubuntu-minimal|linuxmint|mint-meta-|cinnamon|lightdm|gdm3|systemd) ]]; then
+            if is_kept_pkg "$dep" || [[ "$dep" =~ ^(ssh|openssh|ufw|sudo|apparmor|auditd|libpam-|network-manager|ubuntu-desktop|ubuntu-minimal|linuxmint|mint-meta-|cinnamon|open-vm-tools|virtualbox-guest|qemu-guest|hyperv-|linux-image|systemd|lightdm|gdm3) ]]; then
               echo "   [SKIP GUARD] $inst_p (Purge would remove protected dependency $dep)"
               blocked="yes"
               break
@@ -738,7 +742,15 @@ sec_users() {
     for u in $(awk -F: '$2=="" {print $1}' /etc/shadow 2>/dev/null); do
       passwd -l "$u" >/dev/null && log "Locked empty-password account $u"
     done
-    passwd -l root >/dev/null 2>&1 && log "Locked direct root password login"
+    local non_root_admin="no"
+    for adm in $ADMIN_USERS; do
+      if [ "$adm" != "root" ]; then non_root_admin="yes"; break; fi
+    done
+    if [ "$non_root_admin" = "yes" ] && [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+      passwd -l root >/dev/null 2>&1 && log "Locked direct root password login"
+    else
+      warn "Retained root password login because root is the active administrative account"
+    fi
   fi
 }
 
@@ -1097,7 +1109,7 @@ sec_remove() {
           removed_deps=$(echo "$sim_out" | grep -E "^Remv " | awk '{print $2}')
           blocked="no"
           for dep in $removed_deps; do
-            if is_kept_family "$dep" || [[ "$dep" =~ ^(ssh|openssh|ufw|sudo|apparmor|auditd|libpam-|network-manager|ubuntu-desktop|ubuntu-minimal|linuxmint|mint-meta-|cinnamon|lightdm|gdm3|systemd) ]]; then
+            if is_kept_family "$dep" || [[ "$dep" =~ ^(ssh|openssh|ufw|sudo|apparmor|auditd|libpam-|network-manager|ubuntu-desktop|ubuntu-minimal|linuxmint|mint-meta-|cinnamon|open-vm-tools|virtualbox-guest|qemu-guest|hyperv-|linux-image|systemd|lightdm|gdm3) ]]; then
               warn "Skipped purge of $inst_p (would remove protected package $dep)"
               blocked="yes"
               break
@@ -1707,6 +1719,14 @@ sec_defenses() {
       systemctl start "$srv" >/dev/null 2>&1 || true
     done
 
+    # Ensure VM guest tools and snapshot integration services remain running if present
+    for vmsrv in open-vm-tools.service vmtoolsd.service virtualbox-guest-utils.service vboxadd-service.service qemu-guest-agent.service hv-fcopy-daemon.service hv-vss-daemon.service; do
+      if systemctl list-unit-files "$vmsrv" &>/dev/null; then
+        systemctl enable --now "$vmsrv" >/dev/null 2>&1 || true
+        log "Ensured VM guest integration service $vmsrv is enabled and active for snapshots"
+      fi
+    done
+
     # 1. AppArmor (set complain profiles to enforce, skipping kept families)
     if command -v apparmor_status >/dev/null 2>&1 || [ -d /etc/apparmor.d ]; then
       if command -v aa-enforce >/dev/null 2>&1; then
@@ -1910,7 +1930,7 @@ sec_upgrade() {
       local auto_remv
       auto_remv=$(echo "$auto_sim" | grep -E "^Remv " | awk '{print $2}')
       for apkg in $auto_remv; do
-        if is_kept_family "$apkg" || [[ "$apkg" =~ ^(ssh|openssh|ufw|sudo|apparmor|auditd|libpam-|network-manager|ubuntu-desktop|ubuntu-minimal|linuxmint|mint-meta-|cinnamon|lightdm|gdm3|systemd) ]]; then
+        if is_kept_family "$apkg" || [[ "$apkg" =~ ^(ssh|openssh|ufw|sudo|apparmor|auditd|libpam-|network-manager|ubuntu-desktop|ubuntu-minimal|linuxmint|mint-meta-|cinnamon|open-vm-tools|virtualbox-guest|qemu-guest|hyperv-|linux-image|systemd|lightdm|gdm3) ]]; then
           warn "Dependency guard: marking protected package '$apkg' as manual to prevent autoremove"
           apt-mark manual "$apkg" >/dev/null 2>&1 || true
         fi
