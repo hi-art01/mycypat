@@ -35,6 +35,13 @@ ask() {
   [[ "$reply" =~ ^[Yy] ]]
 }
 
+ask_account_action() {
+  local prompt="$1"
+  local reply
+  read -rp "$(echo -e "${Y}?${N}") ${prompt} [y/N]: " reply </dev/tty
+  [[ "$reply" =~ ^[Yy] ]]
+}
+
 ask_timed() {
   local prompt="$1"
   local default="${2:-Y}"
@@ -498,6 +505,7 @@ get_input() {
 
 AUTHORIZED_USERS="$CLI_USERS"
 ADMIN_USERS="$CLI_ADMINS"
+ACCOUNT_REVIEW_INTERACTIVE="no"
 KEEP_SERVICES="$CLI_KEEP"
 UFW_ALLOW="$CLI_PORTS"
 NEW_PASSWORD="$CLI_PASSWORD"
@@ -507,8 +515,6 @@ GROUP_MEMBERSHIPS="$CLI_GROUP_MEMBERSHIPS"
 local_interactive_users=$(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd 2>/dev/null | tr '\n' ' ')
 [ -n "$local_interactive_users" ] && echo -e "${Y}Current interactive accounts found on system:${N} $local_interactive_users"
 
-get_input "Enter ALL Authorized Users (space or comma-separated, e.g. 'alice, bob, charlie')" AUTHORIZED_USERS "${SUDO_USER:-debian}"
-get_input "Enter Authorized Administrators ONLY (space or comma-separated, e.g. 'alice')" ADMIN_USERS "${SUDO_USER:-debian}"
 get_input "Enter Required Services/Packages to KEEP (space-separated, e.g. 'apache2 ssh')" KEEP_SERVICES "ssh"
 get_input "Enter Additional Firewall Ports to ALLOW (space-separated, e.g. '80/tcp 443/tcp 22/tcp')" UFW_ALLOW "22/tcp"
 
@@ -518,6 +524,12 @@ KEEP_SERVICES=$(echo "$KEEP_SERVICES" | tr ',;\t\r\n' '     ' | tr -s ' ' | sed 
 UFW_ALLOW=$(echo "$UFW_ALLOW" | tr ',;\t\r\n' '     ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
 if [ "$NON_INTERACTIVE" != "yes" ] && [ "$SELF_TEST" != "yes" ]; then
+  ACCOUNT_REVIEW_INTERACTIVE="yes"
+  if ask "Add user accounts to this system?" "N"; then
+    read -rp "Enter usernames to add (space/comma-separated, e.g. 'user1 user2'): " CREATE_ITEMS </dev/tty
+  else
+    CREATE_ITEMS=""
+  fi
   read -rp "Enter authorized accounts whose passwords should be reset (space/comma-separated, blank to skip): " PASSWORD_RESET_USERS </dev/tty
   read -rp "Enter required user:group memberships to add (space/comma-separated, blank if none): " GROUP_MEMBERSHIPS </dev/tty
   ask "Is SSH explicitly required on this system?" "Y" && SSH_REQUIRED="yes" || SSH_REQUIRED="no"
@@ -528,7 +540,6 @@ if [ "$NON_INTERACTIVE" != "yes" ] && [ "$SELF_TEST" != "yes" ]; then
   ask "Is MySQL/MariaDB database required?" "N" && REQ_MYSQL="yes" || REQ_MYSQL="no"
   ask "Is PHP required?" "N" && REQ_PHP="yes" || REQ_PHP="no"
 
-  read -rp "Enter any Users or Groups to CREATE if missing (e.g., 'user1:group1 user2'): " CREATE_ITEMS </dev/tty
   read -rp "Enter PROHIBITED Software/Packages from README (space-separated, e.g., 'nmap wireshark'): " EXTRA_PROHIBITED </dev/tty
   read -rp "Enter REQUIRED Software/Packages from README to preserve: " REQUIRED_SOFTWARE </dev/tty
 
@@ -547,6 +558,12 @@ if [ "$NON_INTERACTIVE" != "yes" ] && [ "$SELF_TEST" != "yes" ]; then
   read -rp "Run ALL modules automatically without section prompts? [y/N]: " all_in </dev/tty
   [[ "${all_in:-N}" =~ ^[Yy] ]] && ALL_MODULES="yes" || ALL_MODULES="no"
 else
+  if [ -z "$AUTHORIZED_USERS" ]; then
+    AUTHORIZED_USERS=$(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd | tr '\n' ' ')
+  fi
+  if [ -z "$ADMIN_USERS" ]; then
+    ADMIN_USERS=$(for group in sudo admin; do getent group "$group" | cut -d: -f4 | tr ',' '\n'; done | sort -u | tr '\n' ' ')
+  fi
   SSH_REQUIRED="yes"
   FAST_MODE="yes"
   ALL_MODULES="yes"
@@ -556,6 +573,7 @@ else
   CREATE_ITEMS=""
 fi
 
+CREATE_ITEMS=$(echo "$CREATE_ITEMS" | tr ',;\t\r\n' '     ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 PASSWORD_RESET_USERS=$(echo "$PASSWORD_RESET_USERS" | tr ',;\t\r\n' '     ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 GROUP_MEMBERSHIPS=$(echo "$GROUP_MEMBERSHIPS" | tr ',;\t\r\n' '     ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
@@ -680,6 +698,7 @@ fi
 sec_users() {
   echo -e "\n${Y}=== Module 1: User Accounts & Groups ===${N}"
   if ask "Audit and remediate user accounts and group memberships?"; then
+    local added_users="" user_groups
     # Process CREATE_ITEMS after Step 0 confirmation
     for item in $CREATE_ITEMS; do
       local u_name="${item%%:*}"
@@ -701,6 +720,7 @@ sec_users() {
         fi
         AUTHORIZED_USERS="$AUTHORIZED_USERS $item"
       fi
+      added_users="$added_users $u_name"
       if [ "$created_user" = "yes" ] && [ -n "$NEW_PASSWORD" ]; then
         printf '%s:%s\n' "$u_name" "$NEW_PASSWORD" | chpasswd 2>/dev/null
       elif [ "$created_user" = "yes" ] && [ "$NON_INTERACTIVE" != "yes" ]; then
@@ -737,44 +757,86 @@ sec_users() {
       fi
     done
 
-    # Audit non-root UID 0 accounts
-    awk -F: '$3==0 && $1!="root" {print $1}' /etc/passwd | while read -r u0; do
-      warn "Found non-root UID 0 account: $u0!"
-      if ask_timed "Lock and remove non-root UID 0 account $u0?"; then
-        pkill -KILL -u "$u0" 2>/dev/null
-        userdel -f "$u0" 2>/dev/null && log "Removed UID 0 account $u0 (home directory preserved)"
-      fi
-    done
+    local demote_users=""
+    if [ "$ACCOUNT_REVIEW_INTERACTIVE" = "yes" ]; then
+      AUTHORIZED_USERS=""
+      ADMIN_USERS=""
+      while read -r uid u; do
+        [ -n "$u" ] || continue
+        [ "$u" = "root" ] && continue
+        if inlist "$u" "$added_users"; then
+          AUTHORIZED_USERS="$AUTHORIZED_USERS $u"
+          user_groups=$(id -nG "$u" 2>/dev/null)
+          [[ " $user_groups " == *" sudo "* || " $user_groups " == *" admin "* ]] && ADMIN_USERS="$ADMIN_USERS $u"
+          continue
+        fi
+        if [ "$u" = "${SUDO_USER:-}" ]; then
+          AUTHORIZED_USERS="$AUTHORIZED_USERS $u"
+          ADMIN_USERS="$ADMIN_USERS $u"
+          warn "Retaining the account currently running this script: $u"
+          continue
+        fi
 
-    # Remove unauthorized interactive users
-    for u in $(awk -F: '(($3>=1000 && $3<65534)||($3==0 && $1!="root")) {print $1}' /etc/passwd); do
-      if inlist "$u" "$AUTHORIZED_USERS" || inlist "$u" "$ADMIN_USERS"; then
-        continue
-      fi
-      if [ "$u" == "${SUDO_USER:-}" ] || [ "$u" == "root" ]; then
-        warn "Skipping deletion of running account '$u'."
-        continue
-      fi
+        user_groups=$(id -nG "$u" 2>/dev/null)
+        local is_admin="no"
+        [[ " $user_groups " == *" sudo "* || " $user_groups " == *" admin "* || "$uid" -eq 0 ]] && is_admin="yes"
+        local account_type="user"
+        [ "$is_admin" = "yes" ] && account_type="admin"
+        if ask_account_action "Delete $account_type account '$u' (home directory will be preserved)?"; then
+          pkill -KILL -u "$u" 2>/dev/null
+          if userdel "$u" 2>/dev/null || userdel -f "$u" 2>/dev/null; then
+            log "Removed $account_type account $u (home directory preserved)"
+            continue
+          fi
+          warn "Failed to remove account $u; retaining it"
+        fi
 
-      if [ "$FAST_MODE" = "yes" ]; then
-        do_del="Y"
+        AUTHORIZED_USERS="$AUTHORIZED_USERS $u"
+        if [ "$is_admin" = "yes" ]; then
+          if ask_account_action "Remove administrator privileges from '$u'?"; then
+            demote_users="$demote_users $u"
+          else
+            ADMIN_USERS="$ADMIN_USERS $u"
+          fi
+        fi
+      done < <(awk -F: '($3>=1000 && $3<65534)||($3==0 && $1!="root") {print $3, $1}' /etc/passwd)
+    else
+      # Non-interactive pruning is only based on an explicitly supplied --users list.
+      if [ -n "$CLI_USERS" ]; then
+        for u in $(awk -F: '(($3>=1000 && $3<65534)||($3==0 && $1!="root")) {print $1}' /etc/passwd); do
+          if inlist "$u" "$AUTHORIZED_USERS" || inlist "$u" "$ADMIN_USERS"; then continue; fi
+          [ "$u" = "${SUDO_USER:-}" ] && { warn "Skipping deletion of the active account '$u'"; continue; }
+          pkill -KILL -u "$u" 2>/dev/null
+          if userdel "$u" 2>/dev/null || userdel -f "$u" 2>/dev/null; then
+            log "Removed unauthorized user account $u (home directory preserved)"
+          else
+            warn "Failed to remove unauthorized account $u"
+          fi
+        done
       else
-        ask "Delete UNAUTHORIZED user account '$u' (home directory will be preserved)?" "Y" && do_del="Y" || do_del="N"
+        warn "Skipped account deletion in non-interactive mode; pass --users to define the approved accounts"
       fi
-
-      if [ "$do_del" = "Y" ]; then
-        pkill -KILL -u "$u" 2>/dev/null
-        # Remove user account from system while preserving home directory to prevent catastrophic scoring penalties
-        userdel "$u" 2>/dev/null || userdel -f "$u" 2>/dev/null
-        log "Removed unauthorized user account $u (home directory preserved)"
-      fi
-    done
+    fi
 
     # Enforce privileged group memberships across ALL target groups
     for g in sudo admin adm docker lxd disk shadow lpadmin; do
       getent group "$g" >/dev/null || continue
       for m in $(getent group "$g" | cut -d: -f4 | tr , ' '); do
-        if ! inlist "$m" "$ADMIN_USERS"; then
+        if inlist "$m" "$demote_users"; then
+          if gpasswd -d "$m" "$g" >/dev/null; then
+            log "Removed administrator privilege for $m from group $g"
+          else
+            warn "Failed to remove $m from privileged group $g"
+          fi
+        elif [ "$ACCOUNT_REVIEW_INTERACTIVE" = "yes" ] && { [ "$g" != "sudo" ] && [ "$g" != "admin" ]; }; then
+          if ask_account_action "Remove '$m' from privileged group '$g'?"; then
+            if gpasswd -d "$m" "$g" >/dev/null; then
+              log "Removed $m from privileged group $g"
+            else
+              warn "Failed to remove $m from privileged group $g"
+            fi
+          fi
+        elif ! inlist "$m" "$ADMIN_USERS" && [ "$ACCOUNT_REVIEW_INTERACTIVE" != "yes" ]; then
           if [ "$m" == "${SUDO_USER:-}" ]; then
             warn "User '$m' is running this script. Retaining admin rights."
             continue
@@ -784,9 +846,11 @@ sec_users() {
       done
     done
 
-    for a in $ADMIN_USERS; do
-      id "$a" &>/dev/null && usermod -aG sudo "$a" && log "Ensured authorized admin $a is in sudo group"
-    done
+    if [ "$ACCOUNT_REVIEW_INTERACTIVE" != "yes" ]; then
+      for a in $ADMIN_USERS; do
+        id "$a" &>/dev/null && usermod -aG sudo "$a" && log "Ensured authorized admin $a is in sudo group"
+      done
+    fi
 
     # Lock root password and empty password accounts
     for u in $(awk -F: '$2=="" {print $1}' /etc/shadow 2>/dev/null); do
@@ -1025,8 +1089,18 @@ net.ipv6.conf.default.accept_redirects = 0
 net.ipv6.conf.all.accept_source_route = 0
 net.ipv6.conf.default.accept_source_route = 0
 EOF
-    sysctl --system >/dev/null 2>&1
-    log "Applied IPv4/IPv6 sysctl network security settings"
+    if sysctl --system >> "$LOG" 2>&1; then
+      local syn_cookies forwarding
+      syn_cookies=$(sysctl -n net.ipv4.tcp_syncookies 2>/dev/null)
+      forwarding=$(sysctl -n net.ipv4.ip_forward 2>/dev/null)
+      if [ "$syn_cookies" = "1" ] && [ "$forwarding" = "0" ]; then
+        log "Verified IPv4 TCP SYN cookies enabled and IPv4 forwarding disabled"
+      else
+        warn "IPv4 sysctl verification failed (tcp_syncookies=$syn_cookies, ip_forward=$forwarding)"
+      fi
+    else
+      warn "Failed to apply sysctl network hardening; see $LOG"
+    fi
   fi
 }
 
@@ -1505,9 +1579,14 @@ sec_network() {
     fi
 
     # UFW Firewall Pruning
-    $APT install ufw >/dev/null 2>&1
-    ufw default deny incoming >/dev/null
-    ufw default allow outgoing >/dev/null
+    if ! $APT install ufw >> "$LOG" 2>&1; then
+      warn "Could not install UFW; firewall configuration was skipped"
+      return 1
+    fi
+    if ! ufw default deny incoming >> "$LOG" 2>&1 || ! ufw default allow outgoing >> "$LOG" 2>&1; then
+      warn "Could not configure UFW default policies"
+      return 1
+    fi
 
     ufw status numbered 2>/dev/null | grep -E "\[[ 0-9]+\]" | sort -rn | while read -r rline; do
       rnum=$(echo "$rline" | sed -n 's/^\[ *\([0-9]*\)\].*/\1/p')
@@ -1523,12 +1602,15 @@ sec_network() {
       fi
     done
 
-    [ "$SSH_REQUIRED" == "yes" ] && ufw allow 22/tcp >/dev/null
+    [ "$SSH_REQUIRED" == "yes" ] && ufw allow 22/tcp >> "$LOG" 2>&1
     for port in $UFW_ALLOW; do
-      ufw allow "$port" >/dev/null
+      ufw allow "$port" >> "$LOG" 2>&1 || warn "Could not allow firewall port: $port"
     done
-    ufw --force enable >/dev/null 2>&1
-    log "Configured UFW firewall and pruned unauthorized rules"
+    if ufw --force enable >> "$LOG" 2>&1 && ufw status | grep -q "Status: active"; then
+      log "Enabled UFW firewall and pruned unauthorized rules"
+    else
+      warn "Failed to enable UFW firewall; see $LOG"
+    fi
   fi
 }
 
@@ -1980,31 +2062,73 @@ sec_upgrade() {
 
     if [ "$has_net" = "yes" ]; then
       log "Running apt-get update and upgrade..."
-      DEBIAN_FRONTEND=noninteractive apt-get update -y >> "$LOG" 2>&1 || true
-      DEBIAN_FRONTEND=noninteractive apt-get upgrade -y >> "$LOG" 2>&1 || true
-      log "Completed apt-get upgrade"
-
-      log "Running apt-get dist-upgrade..."
-      DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y >> "$LOG" 2>&1 || true
-      log "Completed apt-get dist-upgrade"
-
-      # Dependency guard check before autoremove
-      local auto_sim
-      auto_sim=$(apt-get -s autoremove 2>/dev/null || true)
-      local auto_remv
-      auto_remv=$(echo "$auto_sim" | grep -E "^Remv " | awk '{print $2}')
-      for apkg in $auto_remv; do
-        if is_kept_family "$apkg" || [[ "$apkg" =~ ^(ssh|openssh|ufw|sudo|apparmor|auditd|libpam-|network-manager|debian-|task-|open-vm-tools|virtualbox-guest|qemu-guest|hyperv-|linux-image|systemd|lightdm|gdm3) ]]; then
-          warn "Dependency guard: marking protected package '$apkg' as manual to prevent autoremove"
-          apt-mark manual "$apkg" >/dev/null 2>&1 || true
+      if DEBIAN_FRONTEND=noninteractive apt-get update >> "$LOG" 2>&1; then
+        if DEBIAN_FRONTEND=noninteractive apt-get upgrade -y >> "$LOG" 2>&1; then
+          log "Completed apt-get upgrade"
+        else
+          warn "apt-get upgrade failed; see $LOG"
         fi
-      done
 
-      log "Running guarded apt-get autoremove..."
-      DEBIAN_FRONTEND=noninteractive apt-get autoremove -y >> "$LOG" 2>&1 || true
-      log "Completed apt-get autoremove"
+        log "Running apt-get dist-upgrade..."
+        if DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y >> "$LOG" 2>&1; then
+          log "Completed apt-get dist-upgrade"
+        else
+          warn "apt-get dist-upgrade failed; see $LOG"
+        fi
 
+        upgrade_installed_package() {
+          local package="$1"
+          local package_status
+          package_status=$(dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null || true)
+          [[ "$package_status" == ii* ]] || return 0
+          if DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y "$package" >> "$LOG" 2>&1; then
+            log "Updated or verified installed package: $package"
+          else
+            warn "Failed to update installed package $package; see $LOG"
+          fi
+        }
+        upgrade_installed_package chromium
+        upgrade_installed_package chromium-browser
+        upgrade_installed_package openssh-server
+        upgrade_installed_package openssh-client
 
+        local chromium_installed="no" openssh_installed="no" package_status
+        for package in chromium chromium-browser; do
+          package_status=$(dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null || true)
+          [[ "$package_status" == ii* ]] && chromium_installed="yes"
+        done
+        if [ "$chromium_installed" = "no" ]; then
+          warn "Chromium is not installed as an APT package; no APT update was applied"
+        fi
+        for package in openssh-server openssh-client; do
+          package_status=$(dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null || true)
+          [[ "$package_status" == ii* ]] && openssh_installed="yes"
+        done
+        [ "$openssh_installed" = "yes" ] || warn "OpenSSH packages are not installed; no OpenSSH package update was applied"
+
+        for protected_package in chromium chromium-browser openssh-server openssh-client; do
+          package_status=$(dpkg-query -W -f='${db:Status-Abbrev}' "$protected_package" 2>/dev/null || true)
+          [[ "$package_status" == ii* ]] && apt-mark manual "$protected_package" >/dev/null 2>&1
+        done
+
+        # Dependency guard check before autoremove
+        local auto_sim
+        auto_sim=$(apt-get -s autoremove 2>/dev/null || true)
+        local auto_remv
+        auto_remv=$(echo "$auto_sim" | grep -E "^Remv " | awk '{print $2}')
+        for apkg in $auto_remv; do
+          if is_kept_family "$apkg" || [[ "$apkg" =~ ^(ssh|openssh|ufw|sudo|apparmor|auditd|libpam-|network-manager|debian-|task-|open-vm-tools|virtualbox-guest|qemu-guest|hyperv-|linux-image|systemd|lightdm|gdm3) ]]; then
+            warn "Dependency guard: marking protected package '$apkg' as manual to prevent autoremove"
+            apt-mark manual "$apkg" >/dev/null 2>&1 || true
+          fi
+        done
+
+        log "Running guarded apt-get autoremove..."
+        DEBIAN_FRONTEND=noninteractive apt-get autoremove -y >> "$LOG" 2>&1 || true
+        log "Completed apt-get autoremove"
+      else
+        warn "apt-get update failed; package upgrades were skipped; see $LOG"
+      fi
     else
       warn "No network connectivity detected; skipping live apt upgrades"
     fi
