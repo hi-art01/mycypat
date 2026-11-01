@@ -14,9 +14,9 @@ mkdir -p /tmp/cp-notes
 
 R=$'\033[1;31m'; G=$'\033[1;32m'; Y=$'\033[1;33m'; N=$'\033[0m'
 
-log()  { echo -e "${G}[+]${N} $1"; echo "$(date +%T) [INFO] $1" >> "$LOG"; echo "$(date +%T) [SCORE-LOG] $1" >> "$SUMMARY"; }
-warn() { echo -e "${Y}[! WARN]${N} $1"; echo "$(date +%T) [WARN] $1" >> "$LOG"; }
-err()  { echo -e "${R}[ERROR]${N} $1"; echo "$(date +%T) [ERROR] $1" >> "$LOG"; }
+log()  { echo -e "${G}[+]${N} $1"; { echo "$(date +%T) [INFO] $1" >> "$LOG"; } 2>/dev/null || true; { echo "$(date +%T) [SCORE-LOG] $1" >> "$SUMMARY"; } 2>/dev/null || true; }
+warn() { echo -e "${Y}[! WARN]${N} $1"; { echo "$(date +%T) [WARN] $1" >> "$LOG"; } 2>/dev/null || true; }
+err()  { echo -e "${R}[ERROR]${N} $1"; { echo "$(date +%T) [ERROR] $1" >> "$LOG"; } 2>/dev/null || true; }
 
 ask() {
   local prompt="$1"
@@ -59,6 +59,15 @@ ask_timed() {
 }
 
 inlist() { [[ " $2 " == *" $1 "* ]]; }
+
+is_kept_family() {
+  local p="$1"
+  for kf in $KEPT_FAMILIES $KEEP_SERVICES $REQUIRED_SOFTWARE; do
+    # shellcheck disable=SC2053
+    if [[ "$p" == $kf ]]; then return 0; fi
+  done
+  return 1
+}
 
 # Format-aware set_kv using two-pass AWK
 set_kv() {
@@ -216,6 +225,175 @@ set_ini() {
 }
 
 # ---------------------------------------------------------------------
+# SUSPICIOUS PERSISTENCE TOKENIZER & CHECKER
+# ---------------------------------------------------------------------
+check_suspicious_file() {
+  local target="$1"
+  [ -f "$target" ] || return 1
+  awk '
+  function trim(s) {
+    sub(/^[ \t]+/, "", s)
+    sub(/[ \t]+$/, "", s)
+    return s
+  }
+  function is_suspicious_line(line,    clean, stripped, n, segs, i, s, tokens, first_tok, exe) {
+    clean = trim(line)
+    if (clean == "" || clean ~ /^#/) return 0
+
+    if (clean ~ /(^|[^a-zA-Z0-9_])(nc|ncat|netcat|socat)($|[^a-zA-Z0-9_])/) return 1
+    if (clean ~ /bash[ \t]+-i|sh[ \t]+-i|\/dev\/(tcp|udp)\//) return 1
+    if (clean ~ /base64[ \t]+-(d|-decode)/) return 1
+    if (clean ~ /(curl|wget)[^|\n]+\|[ \t]*(sh|bash)/) return 1
+    if (clean ~ /(^|[^a-zA-Z0-9_])(python|python3|perl|ruby|php)[ \t]+-[ec]($|[^a-zA-Z0-9_])/) return 1
+
+    if (clean ~ /^[ \t]*Exec(Start|StartPre|StartPost|Reload)[ \t]*=/) {
+      sub(/^[ \t]*Exec(Start|StartPre|StartPost|Reload)[ \t]*=[ \t]*/, "", clean)
+      sub(/^[-@+!]+/, "", clean)
+      sub(/^[ \t]+/, "", clean)
+      if (clean ~ /^[\042\047]/) {
+        sub(/^[\042\047]/, "", clean)
+        sub(/[\042\047].*$/, "", clean)
+        exe = clean
+      } else {
+        split(clean, tokens, /[ \t]+/)
+        exe = tokens[1]
+      }
+      if (exe ~ /^(\/tmp|\/dev\/shm|\/var\/tmp)\//) return 1
+      return 0
+    }
+
+    stripped = clean
+    if (stripped ~ /^@[a-zA-Z]+[ \t]+/) {
+      sub(/^@[a-zA-Z]+[ \t]+/, "", stripped)
+      split(stripped, tokens, /[ \t]+/)
+      if (tokens[1] ~ /^[a-zA-Z0-9_.-]+$/ && tokens[1] !~ /^\// && tokens[2] != "") {
+        sub(/^[a-zA-Z0-9_.-]+[ \t]+/, "", stripped)
+      }
+    } else if (stripped ~ /^([0-9*,/-]+[ \t]+){5}/) {
+      sub(/^([0-9*,/-]+[ \t]+){5}/, "", stripped)
+      split(stripped, tokens, /[ \t]+/)
+      if (tokens[1] ~ /^[a-zA-Z0-9_.-]+$/ && tokens[1] !~ /^\// && tokens[2] != "") {
+        sub(/^[a-zA-Z0-9_.-]+[ \t]+/, "", stripped)
+      }
+    }
+
+    gsub(/&&|\|\||;|\|/, "\n", stripped)
+    n = split(stripped, segs, "\n")
+    for (i = 1; i <= n; i++) {
+      s = trim(segs[i])
+      while (s ~ /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/) {
+        sub(/^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/, "", s)
+      }
+      while (s ~ /^(sudo|env|nohup)[ \t]+/) {
+        sub(/^(sudo|env|nohup)[ \t]+/, "", s)
+      }
+      if (s ~ /^[\042\047]/) {
+        sub(/^[\042\047]/, "", s)
+        sub(/[\042\047].*$/, "", s)
+        first_tok = s
+      } else {
+        split(s, tokens, /[ \t]+/)
+        first_tok = tokens[1]
+      }
+      if (first_tok ~ /^(\/tmp|\/dev\/shm|\/var\/tmp)\//) return 1
+    }
+    return 0
+  }
+  {
+    if (is_suspicious_line($0)) {
+      found = 1
+      exit 0
+    }
+  }
+  END {
+    if (found == 1) exit 0
+    exit 1
+  }
+  ' "$target"
+}
+
+clean_suspicious_file() {
+  local target="$1"
+  [ -f "$target" ] || return 1
+  local tmp="${target}.clean.tmp"
+  awk '
+  function trim(s) {
+    sub(/^[ \t]+/, "", s)
+    sub(/[ \t]+$/, "", s)
+    return s
+  }
+  function is_suspicious_line(line,    clean, stripped, n, segs, i, s, tokens, first_tok, exe) {
+    clean = trim(line)
+    if (clean == "" || clean ~ /^#/) return 0
+
+    if (clean ~ /(^|[^a-zA-Z0-9_])(nc|ncat|netcat|socat)($|[^a-zA-Z0-9_])/) return 1
+    if (clean ~ /bash[ \t]+-i|sh[ \t]+-i|\/dev\/(tcp|udp)\//) return 1
+    if (clean ~ /base64[ \t]+-(d|-decode)/) return 1
+    if (clean ~ /(curl|wget)[^|\n]+\|[ \t]*(sh|bash)/) return 1
+    if (clean ~ /(^|[^a-zA-Z0-9_])(python|python3|perl|ruby|php)[ \t]+-[ec]($|[^a-zA-Z0-9_])/) return 1
+
+    if (clean ~ /^[ \t]*Exec(Start|StartPre|StartPost|Reload)[ \t]*=/) {
+      sub(/^[ \t]*Exec(Start|StartPre|StartPost|Reload)[ \t]*=[ \t]*/, "", clean)
+      sub(/^[-@+!]+/, "", clean)
+      sub(/^[ \t]+/, "", clean)
+      if (clean ~ /^[\042\047]/) {
+        sub(/^[\042\047]/, "", clean)
+        sub(/[\042\047].*$/, "", clean)
+        exe = clean
+      } else {
+        split(clean, tokens, /[ \t]+/)
+        exe = tokens[1]
+      }
+      if (exe ~ /^(\/tmp|\/dev\/shm|\/var\/tmp)\//) return 1
+      return 0
+    }
+
+    stripped = clean
+    if (stripped ~ /^@[a-zA-Z]+[ \t]+/) {
+      sub(/^@[a-zA-Z]+[ \t]+/, "", stripped)
+      split(stripped, tokens, /[ \t]+/)
+      if (tokens[1] ~ /^[a-zA-Z0-9_.-]+$/ && tokens[1] !~ /^\// && tokens[2] != "") {
+        sub(/^[a-zA-Z0-9_.-]+[ \t]+/, "", stripped)
+      }
+    } else if (stripped ~ /^([0-9*,/-]+[ \t]+){5}/) {
+      sub(/^([0-9*,/-]+[ \t]+){5}/, "", stripped)
+      split(stripped, tokens, /[ \t]+/)
+      if (tokens[1] ~ /^[a-zA-Z0-9_.-]+$/ && tokens[1] !~ /^\// && tokens[2] != "") {
+        sub(/^[a-zA-Z0-9_.-]+[ \t]+/, "", stripped)
+      }
+    }
+
+    gsub(/&&|\|\||;|\|/, "\n", stripped)
+    n = split(stripped, segs, "\n")
+    for (i = 1; i <= n; i++) {
+      s = trim(segs[i])
+      while (s ~ /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/) {
+        sub(/^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/, "", s)
+      }
+      while (s ~ /^(sudo|env|nohup)[ \t]+/) {
+        sub(/^(sudo|env|nohup)[ \t]+/, "", s)
+      }
+      if (s ~ /^[\042\047]/) {
+        sub(/^[\042\047]/, "", s)
+        sub(/[\042\047].*$/, "", s)
+        first_tok = s
+      } else {
+        split(s, tokens, /[ \t]+/)
+        first_tok = tokens[1]
+      }
+      if (first_tok ~ /^(\/tmp|\/dev\/shm|\/var\/tmp)\//) return 1
+    }
+    return 0
+  }
+  {
+    if (!is_suspicious_line($0)) {
+      print $0
+    }
+  }
+  ' "$target" > "$tmp" && cat "$tmp" > "$target" && rm -f "$tmp"
+}
+
+# ---------------------------------------------------------------------
 # PARSE COMMAND LINE FLAGS
 # ---------------------------------------------------------------------
 NON_INTERACTIVE="no"
@@ -246,31 +424,6 @@ echo -e "${G}====================================================${N}"
 # ---------------------------------------------------------------------
 # FORENSICS GATE
 # ---------------------------------------------------------------------
-if [ "$SELF_TEST" != "yes" ]; then
-  # Root check deferred
-  mkdir -p /tmp/cp-notes
-fi
-
-if [ "$SELF_TEST" != "yes" ]; then
-  # Root check deferred
-  mkdir -p /tmp/cp-notes
-fi
-
-if [ "$SELF_TEST" != "yes" ]; then
-  # Root check deferred
-  mkdir -p /tmp/cp-notes
-fi
-
-if [ "$SELF_TEST" != "yes" ]; then
-  # Root check deferred
-  mkdir -p /tmp/cp-notes
-fi
-
-if [ "$SELF_TEST" != "yes" ]; then
-  # Root check deferred
-  mkdir -p /tmp/cp-notes
-fi
-
 if [ "$SELF_TEST" != "yes" ]; then
   [ "$EUID" -eq 0 ] || { echo "Error: Must be run with sudo/root permissions."; exit 1; }
   mkdir -p /tmp/cp-notes
@@ -373,6 +526,18 @@ else
   CREATE_ITEMS=""
 fi
 
+# Infer required services from KEEP_SERVICES and REQUIRED_SOFTWARE
+for s in $KEEP_SERVICES $REQUIRED_SOFTWARE; do
+  case "$s" in
+    *apache*) REQ_APACHE="yes" ;;
+    *nginx*)  REQ_NGINX="yes" ;;
+    *vsftpd*|*ftp*) REQ_FTP="yes" ;;
+    *samba*|*smb*)  REQ_SAMBA="yes" ;;
+    *mysql*|*mariadb*) REQ_MYSQL="yes" ;;
+    *php*)    REQ_PHP="yes" ;;
+  esac
+done
+
 # Build Kept Family Map
 KEPT_FAMILIES=""
 [ "$REQ_APACHE" = "yes" ] && KEPT_FAMILIES="$KEPT_FAMILIES apache2* libapache2-mod-*"
@@ -456,7 +621,7 @@ if [ "$SELF_TEST" = "yes" ]; then
     done
   done
 
-  echo -e "\n3. Target Configuration Files to be Hardened:"
+  echo -e "\n3. Target Configuration Files & Operations to be Hardened:"
   echo "   - /etc/login.defs, /etc/security/pwquality.conf, /etc/pam.d/su"
   echo "   - /etc/sudoers, /etc/sudoers.d/*"
   echo "   - /etc/sysctl.d/99-cp-hardening.conf"
@@ -464,7 +629,12 @@ if [ "$SELF_TEST" = "yes" ]; then
   echo "   - /etc/apt/sources.list, /etc/apt/sources.list.d/*"
   echo "   - /etc/hosts, /etc/resolv.conf, /etc/systemd/resolved.conf"
   echo "   - /boot/grub/grub.cfg"
+  echo "   - Service Hardening: Apache, vsftpd, Samba, MySQL/MariaDB, PHP, Nginx (when required)"
+  echo "   - System Defenses: auditd rules, AppArmor enforce, fail2ban, rsyslog, LightDM/GDM guest/autologin off, kernel module blacklists, coredumps off"
+  echo "   - Package Upgrades: apt-get update & upgrade, dist-upgrade, guarded autoremove, unattended-upgrades"
+  echo "   - Post-Run Health Check & System Verification Report"
   echo -e "\nSelf-test complete. Exiting without making modifications."
+  log "skipped: no network/changes in self-test"
   exit 0
 fi
 
@@ -771,8 +941,24 @@ sec_perms() {
     chown root:shadow /etc/shadow /etc/gshadow 2>/dev/null; chmod 640 /etc/shadow /etc/gshadow
     chown root:root /etc/passwd /etc/group; chmod 644 /etc/passwd /etc/group
     chmod 440 /etc/sudoers 2>/dev/null; chmod 440 /etc/sudoers.d/* 2>/dev/null
-    chmod 600 /etc/crontab /etc/ssh/sshd_config /boot/grub/grub.cfg 2>/dev/null
-    chown root:root /boot/grub/grub.cfg 2>/dev/null
+    chmod 600 /etc/crontab /etc/ssh/sshd_config /boot/grub/grub.cfg 2>/dev/null || true
+    chown root:root /boot/grub/grub.cfg 2>/dev/null || true
+    if [ -f /etc/default/grub ]; then
+      cp -p /etc/default/grub /etc/default/grub.cpbak 2>/dev/null || true
+      sed -i -E '/^[[:space:]]*GRUB_CMDLINE_LINUX/ {
+        s/rw[[:space:]]+init=[^ "\x27]*//g
+        s/rw[[:space:]]+init//g
+        s/init=[^ "\x27]*//g
+        s/(^|[[:space:]])single([[:space:]]|$)/ /g
+        s/[[:space:]]{2,}/ /g
+        s/="[[:space:]]+/="/g
+        s/[[:space:]]+"/"/g
+      }' /etc/default/grub 2>/dev/null || true
+      if command -v update-grub >/dev/null 2>&1; then
+        update-grub >/dev/null 2>&1 || true
+      fi
+      log "Hardened GRUB: secured /boot/grub/grub.cfg and sanitized GRUB_CMDLINE_LINUX parameters"
+    fi
     chmod 700 /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly 2>/dev/null
 
     # Non-recursive 750 on user home directories
@@ -943,9 +1129,6 @@ sec_backdoor() {
       done
     fi
 
-    # Anchored persistence pattern
-    persist_pat='(\b(nc|ncat|netcat|socat)\b|bash[[:space:]]+-i|/dev/tcp/|base64[[:space:]]+-d|(curl|wget).+\|[[:space:]]*(sh|bash)|\b(python|python3|perl|ruby)\b[[:space:]]+-[ec]\b|/(tmp|dev/shm|var/tmp)/)'
-
     # Scan cron files
     for cronfile in /etc/crontab /etc/cron.d/* /var/spool/cron/crontabs/* /etc/cron.hourly/* /etc/cron.daily/* /etc/cron.weekly/* /etc/cron.monthly/*; do
       [ -f "$cronfile" ] || continue
@@ -953,38 +1136,40 @@ sec_backdoor() {
       # Skip package-owned files in system cron locations
       if [[ "$cronfile" == /etc/cron.* ]] || [[ "$cronfile" == /etc/crontab ]]; then
         if dpkg -S "$cronfile" &>/dev/null; then
-          if grep -qE "$persist_pat" "$cronfile" 2>/dev/null; then
+          if check_suspicious_file "$cronfile"; then
             log "[SKIP PACKAGE CRON] $cronfile matched persistence pattern but is owned by installed package"
           fi
           continue
         fi
       fi
 
-      if grep -qE "$persist_pat" "$cronfile" 2>/dev/null; then
+      if check_suspicious_file "$cronfile"; then
         warn "Suspicious persistence entry in $cronfile"
         if ask_timed "Clean suspicious persistence lines in $cronfile?"; then
-          sed -i -E "/${persist_pat}/d" "$cronfile"
+          clean_suspicious_file "$cronfile"
           log "Cleaned cron file: $cronfile"
         fi
       fi
     done
 
     # Scan systemd service/timer files
-    find /etc/systemd/system ~/.config/systemd/user -type f \( -name "*.service" -o -name "*.timer" \) 2>/dev/null | while read -r unitfile; do
+    find /etc/systemd/system /root/.config/systemd/user /home/*/.config/systemd/user -type f \( -name "*.service" -o -name "*.timer" \) 2>/dev/null | while read -r unitfile; do
+      [ -f "$unitfile" ] || continue
       uname=$(basename "$unitfile")
 
       # Skip if owned by an installed package
       if dpkg -S "$unitfile" &>/dev/null; then
-        if grep -iE "^ExecStart=.*${persist_pat}" "$unitfile" 2>/dev/null; then
+        if check_suspicious_file "$unitfile"; then
           log "[SKIP PACKAGE SYSTEMD] $unitfile ExecStart matched persistence pattern but is owned by installed package"
         fi
         continue
       fi
 
-      if grep -iE "^ExecStart=.*${persist_pat}" "$unitfile" 2>/dev/null; then
+      if check_suspicious_file "$unitfile"; then
         warn "Suspicious systemd unit file: $unitfile"
         if ask_timed "Disable and delete suspicious systemd unit $uname?"; then
           systemctl disable --now "$uname" 2>/dev/null
+          clean_suspicious_file "$unitfile" 2>/dev/null || true
           rm -f "$unitfile" && log "Deleted suspicious unit file $unitfile"
           systemctl daemon-reload
         fi
@@ -1245,5 +1430,733 @@ sec_network() {
     log "Configured UFW firewall and pruned unauthorized rules"
   fi
 }
+
+# ---------------------------------------------------------------------
+# 12. ROOTKIT & MALWARE SCANNERS (REPORT-ONLY)
+# ---------------------------------------------------------------------
+sec_scanner() {
+  echo -e "\n${Y}=== Module 12: Rootkit & Malware Scanners ===${N}"
+  if ask "Run rootkit and malware scanners (rkhunter, chkrootkit, clamscan)?"; then
+    if [ "$SELF_TEST" = "yes" ]; then
+      log "skipped: no network/changes in self-test"
+      return 0
+    fi
+
+    local has_net="no"
+    if ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 || ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+      has_net="yes"
+    fi
+
+    # rkhunter
+    if ! command -v rkhunter >/dev/null 2>&1; then
+      if [ "$has_net" = "yes" ]; then
+        $APT install rkhunter >/dev/null 2>&1
+      fi
+    fi
+    if command -v rkhunter >/dev/null 2>&1; then
+      log "Running rkhunter scan (timeout 600s)..."
+      timeout 600 rkhunter --check --sk --nocolors >> "$LOG" 2>&1 || true
+      log "rkhunter scan finished"
+    else
+      warn "rkhunter not installed; skipping scan"
+    fi
+
+    # chkrootkit
+    if ! command -v chkrootkit >/dev/null 2>&1; then
+      if [ "$has_net" = "yes" ]; then
+        $APT install chkrootkit >/dev/null 2>&1
+      fi
+    fi
+    if command -v chkrootkit >/dev/null 2>&1; then
+      log "Running chkrootkit scan (timeout 600s)..."
+      timeout 600 chkrootkit >> "$LOG" 2>&1 || true
+      log "chkrootkit scan finished"
+    else
+      warn "chkrootkit not installed; skipping scan"
+    fi
+
+    # clamscan
+    if ! command -v clamscan >/dev/null 2>&1; then
+      if [ "$has_net" = "yes" ]; then
+        $APT install clamav >/dev/null 2>&1
+      fi
+    fi
+    if command -v clamscan >/dev/null 2>&1; then
+      log "Running clamscan on /home /tmp /var/tmp (timeout 600s)..."
+      timeout 600 clamscan -ri /home /tmp /var/tmp >> "$LOG" 2>&1 || true
+      log "clamscan scan finished"
+    else
+      warn "clamscan not installed; skipping scan"
+    fi
+
+    # snap refresh (Ubuntu only)
+    if command -v snap >/dev/null 2>&1; then
+      log "Running snap refresh (timeout 600s)..."
+      timeout 600 snap refresh >> "$LOG" 2>&1 || true
+      log "snap refresh finished"
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------
+# 13. REQUIRED SERVICE HARDENING
+# ---------------------------------------------------------------------
+sec_services() {
+  echo -e "\n${Y}=== Module 13: Required Service Hardening ===${N}"
+  if [ "$SELF_TEST" = "yes" ]; then
+    log "skipped: no network/changes in self-test"
+    return 0
+  fi
+  if [ "$ALL_MODULES" = "yes" ] || ask_timed "Harden configurations for required services (Apache, vsftpd, Samba, MySQL/MariaDB, PHP, Nginx)?" "Y"; then
+    # 1. Apache
+    if [ "$REQ_APACHE" = "yes" ] && command -v apache2 >/dev/null 2>&1; then
+      local ap_conf="/etc/apache2/conf-available/security.conf"
+      [ -f "$ap_conf" ] || ap_conf="/etc/apache2/apache2.conf"
+      if [ -f "$ap_conf" ]; then
+        cp -p "$ap_conf" "${ap_conf}.cp_bak"
+        set_kv "ServerTokens" "Prod" "$ap_conf" " "
+        set_kv "ServerSignature" "Off" "$ap_conf" " "
+        set_kv "TraceEnable" "Off" "$ap_conf" " "
+        if command -v apache2ctl >/dev/null 2>&1 && ! apache2ctl configtest >/dev/null 2>&1; then
+          warn "Apache config validation failed, restoring original config"
+          mv -f "${ap_conf}.cp_bak" "$ap_conf"
+        else
+          rm -f "${ap_conf}.cp_bak"
+          log "Hardened Apache configuration (ServerTokens Prod, ServerSignature Off, TraceEnable Off)"
+          systemctl reload apache2 2>/dev/null || true
+        fi
+      fi
+    fi
+
+    # 2. vsftpd
+    if [ "$REQ_FTP" = "yes" ] && command -v vsftpd >/dev/null 2>&1; then
+      local ftp_conf="/etc/vsftpd.conf"
+      if [ -f "$ftp_conf" ]; then
+        cp -p "$ftp_conf" "${ftp_conf}.cp_bak"
+        set_kv "anonymous_enable" "NO" "$ftp_conf" "="
+        set_kv "local_enable" "YES" "$ftp_conf" "="
+        set_kv "write_enable" "YES" "$ftp_conf" "="
+        set_kv "chroot_local_user" "YES" "$ftp_conf" "="
+        set_kv "allow_writeable_chroot" "YES" "$ftp_conf" "="
+        set_kv "anon_upload_enable" "NO" "$ftp_conf" "="
+        set_kv "anon_mkdir_write_enable" "NO" "$ftp_conf" "="
+        set_kv "dirmessage_enable" "YES" "$ftp_conf" "="
+        set_kv "xferlog_enable" "YES" "$ftp_conf" "="
+        set_kv "connect_from_port_20" "YES" "$ftp_conf" "="
+        local test_err=0
+        systemctl restart vsftpd 2>/dev/null || test_err=1
+        if [ $test_err -eq 0 ] && systemctl is-active vsftpd >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ':21[[:space:]]'; then
+          rm -f "${ftp_conf}.cp_bak"
+          log "Hardened VSFTPD configuration (anonymous_enable=NO, chroot_local_user=YES, allow_writeable_chroot=YES)"
+        else
+          warn "vsftpd verification failed (service inactive or port 21 not listening), restoring original config"
+          mv -f "${ftp_conf}.cp_bak" "$ftp_conf"
+          systemctl restart vsftpd 2>/dev/null || true
+        fi
+      fi
+    fi
+
+    # 3. Samba
+    if [ "$REQ_SAMBA" = "yes" ] && command -v smbd >/dev/null 2>&1; then
+      local smb_conf="/etc/samba/smb.conf"
+      if [ -f "$smb_conf" ]; then
+        cp -p "$smb_conf" "${smb_conf}.cp_bak"
+        set_ini "global" "server min protocol" "SMB2" "$smb_conf"
+        set_ini "global" "client min protocol" "SMB2" "$smb_conf"
+        set_ini "global" "restrict anonymous" "2" "$smb_conf"
+        set_ini "global" "null passwords" "no" "$smb_conf"
+        if command -v testparm >/dev/null 2>&1 && ! testparm -s "$smb_conf" >/dev/null 2>&1; then
+          warn "Samba config validation (testparm) failed, restoring original config"
+          mv -f "${smb_conf}.cp_bak" "$smb_conf"
+        else
+          rm -f "${smb_conf}.cp_bak"
+          log "Hardened Samba configuration (server min protocol SMB2, restrict anonymous = 2)"
+          systemctl restart smbd 2>/dev/null || true
+        fi
+      fi
+    fi
+
+    # 4. MySQL / MariaDB
+    if [ "$REQ_MYSQL" = "yes" ] && (command -v mysql >/dev/null 2>&1 || command -v mariadb >/dev/null 2>&1); then
+      local my_conf=""
+      for c in /etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/mariadb.conf.d/50-server.cnf /etc/mysql/my.cnf; do
+        if [ -f "$c" ]; then my_conf="$c"; break; fi
+      done
+      if [ -n "$my_conf" ]; then
+        cp -p "$my_conf" "${my_conf}.cp_bak"
+        set_ini "mysqld" "bind-address" "127.0.0.1" "$my_conf"
+        set_ini "mysqld" "local-infile" "0" "$my_conf"
+        set_ini "mysqld" "symbolic-links" "0" "$my_conf"
+        local my_err=0
+        if command -v mysqld >/dev/null 2>&1; then
+          mysqld --help --verbose >/dev/null 2>&1 || my_err=1
+        elif command -v mariadbd >/dev/null 2>&1; then
+          mariadbd --help --verbose >/dev/null 2>&1 || my_err=1
+        fi
+        if [ $my_err -ne 0 ]; then
+          warn "MySQL/MariaDB config test failed, restoring original config"
+          mv -f "${my_conf}.cp_bak" "$my_conf"
+        else
+          rm -f "${my_conf}.cp_bak"
+          log "Hardened MySQL/MariaDB configuration (bind-address 127.0.0.1, local-infile 0)"
+          systemctl restart mysql 2>/dev/null || systemctl restart mariadb 2>/dev/null || true
+        fi
+      fi
+    fi
+
+    # 5. PHP
+    if [ "$REQ_PHP" = "yes" ]; then
+      local php_found="no"
+      for pini in /etc/php/*/*/php.ini; do
+        [ -f "$pini" ] || continue
+        php_found="yes"
+        cp -p "$pini" "${pini}.cp_bak"
+        set_kv "expose_php" "Off" "$pini" " = "
+        set_kv "display_errors" "Off" "$pini" " = "
+        set_kv "allow_url_fopen" "Off" "$pini" " = "
+        set_kv "allow_url_include" "Off" "$pini" " = "
+        set_kv "session.cookie_httponly" "1" "$pini" " = "
+        set_kv "session.use_only_cookies" "1" "$pini" " = "
+        if command -v php >/dev/null 2>&1 && ! php -n -c "$pini" -r 'echo 1;' >/dev/null 2>&1; then
+          warn "PHP syntax validation failed on $pini, restoring original file"
+          mv -f "${pini}.cp_bak" "$pini"
+        else
+          rm -f "${pini}.cp_bak"
+          log "Hardened PHP configuration: $pini (expose_php = Off, display_errors = Off)"
+        fi
+      done
+      if [ "$php_found" = "yes" ]; then
+        systemctl reload apache2 2>/dev/null || true
+        systemctl restart 'php*-fpm' 2>/dev/null || true
+      fi
+    fi
+
+    # 6. Nginx
+    if [ "$REQ_NGINX" = "yes" ] && command -v nginx >/dev/null 2>&1; then
+      local ng_conf="/etc/nginx/nginx.conf"
+      if [ -f "$ng_conf" ]; then
+        if grep -q "server_tokens" "$ng_conf"; then
+          cp -p "$ng_conf" "${ng_conf}.cp_bak"
+          sed -i -E 's/^[[:space:]]*#?[[:space:]]*server_tokens[[:space:]]+(on|off);/\tserver_tokens off;/' "$ng_conf"
+          if command -v nginx >/dev/null 2>&1 && ! nginx -t >/dev/null 2>&1; then
+            warn "Nginx config test (nginx -t) failed, restoring original config"
+            mv -f "${ng_conf}.cp_bak" "$ng_conf"
+          else
+            rm -f "${ng_conf}.cp_bak"
+            log "Hardened Nginx configuration (server_tokens off;)"
+            systemctl reload nginx 2>/dev/null || true
+          fi
+        else
+          mkdir -p /etc/nginx/conf.d
+          local ng_dropin="/etc/nginx/conf.d/cp-hardening.conf"
+          echo "server_tokens off;" > "$ng_dropin"
+          if command -v nginx >/dev/null 2>&1 && ! nginx -t >/dev/null 2>&1; then
+            warn "Nginx config test (nginx -t) failed with $ng_dropin, removing file"
+            rm -f "$ng_dropin"
+          else
+            log "Hardened Nginx configuration via $ng_dropin (server_tokens off;)"
+            systemctl reload nginx 2>/dev/null || true
+          fi
+        fi
+      fi
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------
+# 14. DEFENSES, LOGGING & ACCESS CONTROLS
+# ---------------------------------------------------------------------
+sec_defenses() {
+  echo -e "\n${Y}=== Module 14: Defenses, Logging & Access Controls ===${N}"
+  if [ "$SELF_TEST" = "yes" ]; then
+    log "skipped: no network/changes in self-test"
+    return 0
+  fi
+  if [ "$ALL_MODULES" = "yes" ] || ask_timed "Enable defenses (AppArmor enforce, auditd rules, fail2ban, rsyslog, disable guest/autologin, blacklist USB storage/firewire, disable coredumps)?" "Y"; then
+    local has_net="no"
+    if ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 || ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+      has_net="yes"
+    fi
+
+    if [ "$SELF_TEST" != "yes" ] && [ "$has_net" = "yes" ]; then
+      $APT install auditd audispd-plugins apparmor apparmor-utils fail2ban rsyslog ufw >/dev/null 2>&1
+    fi
+
+    for srv in auditd apparmor fail2ban rsyslog ufw; do
+      systemctl enable "$srv" >/dev/null 2>&1 || true
+      systemctl start "$srv" >/dev/null 2>&1 || true
+    done
+
+    # 1. AppArmor (set complain profiles to enforce, skipping kept families)
+    if command -v apparmor_status >/dev/null 2>&1 || [ -d /etc/apparmor.d ]; then
+      if command -v aa-enforce >/dev/null 2>&1; then
+        for prof in /etc/apparmor.d/*; do
+          [ -f "$prof" ] || continue
+          base=$(basename "$prof")
+          [[ "$base" =~ ^(local|abstractions|tunables|disable|force-complain)$ ]] && continue
+
+          target_bin="/${base//.//}"
+          if [ ! -e "$target_bin" ]; then
+            target_bin=$(grep -E '^[[:space:]]*(profile[[:space:]]+)?[/]' "$prof" 2>/dev/null | head -n1 | sed -E 's/^[[:space:]]*(profile[[:space:]]+)?([^ {]+).*/\2/')
+          fi
+
+          pkg_name=""
+          if [ -n "$target_bin" ] && [ -e "$target_bin" ]; then
+            pkg_name=$(dpkg -S "$target_bin" 2>/dev/null | cut -d: -f1)
+          fi
+          if [ -z "$pkg_name" ] && [ -n "$target_bin" ]; then
+            pkg_name=$(basename "$target_bin")
+          fi
+          if [ -z "$pkg_name" ]; then
+            pkg_name="${base##*.}"
+          fi
+
+          if [ -n "$pkg_name" ] && is_kept_family "$pkg_name"; then
+            log "Skipping aa-enforce on $base (binary package '$pkg_name' in kept families)"
+            continue
+          fi
+          if is_kept_family "$base" || ( [ -n "$target_bin" ] && is_kept_family "$(basename "$target_bin")" ); then
+            log "Skipping aa-enforce on $base (matched kept families)"
+            continue
+          fi
+
+          aa-enforce "$prof" >/dev/null 2>&1 || true
+        done
+        log "Enforced AppArmor profiles with aa-enforce (protected kept families)"
+      else
+        log "AppArmor service enabled"
+      fi
+    fi
+
+    # 2. Auditd and audit rules
+    if command -v auditctl >/dev/null 2>&1 || [ -d /etc/audit ]; then
+      systemctl enable --now auditd >/dev/null 2>&1 || true
+      mkdir -p /etc/audit/rules.d
+      cat << 'EOF' > /etc/audit/rules.d/cp-audit.rules
+## Identity files
+-w /etc/passwd -p wa -k identity
+-w /etc/group -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/gshadow -p wa -k identity
+-w /etc/security/opasswd -p wa -k identity
+
+## Sudoers
+-w /etc/sudoers -p wa -k sudoers
+-w /etc/sudoers.d/ -p wa -k sudoers
+
+## Logins and session tracking
+-w /var/log/faillog -p wa -k logins
+-w /var/log/lastlog -p wa -k logins
+-w /var/log/tallylog -p wa -k logins
+-w /var/run/utmp -p wa -k session
+-w /var/log/wtmp -p wa -k session
+-w /var/log/btmp -p wa -k session
+
+## Time changes
+-a always,exit -F arch=b64 -S adjtimex,settimeofday,clock_settime -k time_change
+-a always,exit -F arch=b32 -S adjtimex,settimeofday,clock_settime -k time_change
+-w /etc/localtime -p wa -k time_change
+EOF
+      if command -v augenrules >/dev/null 2>&1; then
+        augenrules --load >/dev/null 2>&1 || true
+      elif command -v auditctl >/dev/null 2>&1; then
+        auditctl -R /etc/audit/rules.d/cp-audit.rules >/dev/null 2>&1 || true
+      fi
+      log "Configured auditd rules for identity files, sudoers, logins, and time changes"
+    fi
+
+    # 3. fail2ban
+    if command -v fail2ban-client >/dev/null 2>&1 || [ -d /etc/fail2ban ]; then
+      systemctl enable --now fail2ban >/dev/null 2>&1 || true
+      if [ -f /etc/fail2ban/jail.conf ] && [ ! -f /etc/fail2ban/jail.local ]; then
+        cat << 'EOF' > /etc/fail2ban/jail.local
+[DEFAULT]
+bantime = 1h
+findtime = 10m
+maxretry = 5
+EOF
+        systemctl restart fail2ban >/dev/null 2>&1 || true
+      fi
+      log "Enabled and hardened fail2ban service"
+    fi
+
+    # 4. rsyslog
+    if command -v rsyslogd >/dev/null 2>&1 || systemctl list-unit-files rsyslog.service &>/dev/null; then
+      systemctl enable --now rsyslog >/dev/null 2>&1 || true
+      log "Enabled and started rsyslog logging service"
+    fi
+
+    # 5. Disable Guest and Auto-login (LightDM)
+    mkdir -p /etc/lightdm/lightdm.conf.d
+    cat << 'EOF' > /etc/lightdm/lightdm.conf.d/50-cp-hardening.conf
+[Seat:*]
+allow-guest=false
+autologin-user=
+autologin-guest=false
+EOF
+    if [ -f /etc/lightdm/lightdm.conf ]; then
+      set_kv "allow-guest" "false" "/etc/lightdm/lightdm.conf" "="
+      set_kv "autologin-user" "" "/etc/lightdm/lightdm.conf" "="
+      set_kv "autologin-guest" "false" "/etc/lightdm/lightdm.conf" "="
+    fi
+    log "Disabled Guest and auto-login in LightDM (allow-guest=false, autologin-user=)"
+
+    # 6. Disable Auto-login (GDM)
+    for gdm_conf in /etc/gdm3/custom.conf /etc/gdm/custom.conf; do
+      if [ -f "$gdm_conf" ]; then
+        set_ini "daemon" "AutomaticLoginEnable" "false" "$gdm_conf"
+        set_ini "daemon" "TimedLoginEnable" "false" "$gdm_conf"
+        log "Disabled automatic login in GDM ($gdm_conf)"
+      fi
+    done
+
+    # 7. Disable USB storage, Firewire and Thunderbolt kernel modules
+    cat << 'EOF' > /etc/modprobe.d/cp-blacklist.conf
+install usb-storage /bin/false
+blacklist usb-storage
+install firewire-core /bin/false
+blacklist firewire-core
+install firewire-ohci /bin/false
+blacklist firewire-ohci
+install firewire-sbp2 /bin/false
+blacklist firewire-sbp2
+install thunderbolt /bin/false
+blacklist thunderbolt
+EOF
+    log "Disabled usb-storage, firewire, and thunderbolt kernel modules in /etc/modprobe.d/cp-blacklist.conf"
+
+    # 8. Mask Ctrl-Alt-Del
+    systemctl mask ctrl-alt-del.target >/dev/null 2>&1 || true
+    log "Masked ctrl-alt-del.target reboot trigger"
+
+    # 9. Core dumps off (limits.conf, fs.suid_dumpable, systemd coredump Storage=none)
+    mkdir -p /etc/security/limits.d
+    cat << 'EOF' > /etc/security/limits.d/10-disable-coredump.conf
+* hard core 0
+* soft core 0
+EOF
+    if [ -f /etc/security/limits.conf ]; then
+      grep -q "hard core 0" /etc/security/limits.conf || echo "* hard core 0" >> /etc/security/limits.conf
+      grep -q "soft core 0" /etc/security/limits.conf || echo "* soft core 0" >> /etc/security/limits.conf
+    fi
+
+    # sysctl fs.suid_dumpable = 0
+    echo "fs.suid_dumpable = 0" > /etc/sysctl.d/50-coredump.conf
+    sysctl -w fs.suid_dumpable=0 >/dev/null 2>&1 || true
+
+    # systemd coredump Storage=none
+    if [ -f /etc/systemd/coredump.conf ]; then
+      set_ini "Coredump" "Storage" "none" "/etc/systemd/coredump.conf"
+      set_ini "Coredump" "ProcessSizeMax" "0" "/etc/systemd/coredump.conf"
+    fi
+    mkdir -p /etc/systemd/coredump.conf.d
+    cat << 'EOF' > /etc/systemd/coredump.conf.d/disable.conf
+[Coredump]
+Storage=none
+ProcessSizeMax=0
+EOF
+    log "Disabled core dumps in limits.conf, fs.suid_dumpable=0, and systemd coredump Storage=none"
+  fi
+}
+
+# ---------------------------------------------------------------------
+# 15. PACKAGE UPGRADES & UPDATE POLICIES
+# ---------------------------------------------------------------------
+sec_upgrade() {
+  echo -e "\n${Y}=== Module 15: Package Upgrades & Security Updates ===${N}"
+  if [ "$SELF_TEST" = "yes" ]; then
+    log "skipped: no network/changes in self-test"
+    return 0
+  fi
+  if [ "$ALL_MODULES" = "yes" ] || ask_timed "Perform package updates, dist-upgrade, guarded autoremove, and unattended-upgrades?" "Y"; then
+    local has_net="no"
+    if ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 || ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+      has_net="yes"
+    fi
+
+    if [ "$has_net" = "yes" ]; then
+      log "Running apt-get update and upgrade..."
+      DEBIAN_FRONTEND=noninteractive apt-get update -y >> "$LOG" 2>&1 || true
+      DEBIAN_FRONTEND=noninteractive apt-get upgrade -y >> "$LOG" 2>&1 || true
+      log "Completed apt-get upgrade"
+
+      log "Running apt-get dist-upgrade..."
+      DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y >> "$LOG" 2>&1 || true
+      log "Completed apt-get dist-upgrade"
+
+      # Dependency guard check before autoremove
+      local auto_sim
+      auto_sim=$(apt-get -s autoremove 2>/dev/null || true)
+      local auto_remv
+      auto_remv=$(echo "$auto_sim" | grep -E "^Remv " | awk '{print $2}')
+      for apkg in $auto_remv; do
+        if is_kept_family "$apkg" || [[ "$apkg" =~ ^(ssh|openssh|ufw|sudo|apparmor|auditd|libpam-|network-manager|ubuntu-desktop|ubuntu-minimal|linuxmint|mint-meta-|cinnamon|lightdm|gdm3|systemd) ]]; then
+          warn "Dependency guard: marking protected package '$apkg' as manual to prevent autoremove"
+          apt-mark manual "$apkg" >/dev/null 2>&1 || true
+        fi
+      done
+
+      log "Running guarded apt-get autoremove..."
+      DEBIAN_FRONTEND=noninteractive apt-get autoremove -y >> "$LOG" 2>&1 || true
+      log "Completed apt-get autoremove"
+
+      # snap refresh on Ubuntu if snap exists
+      if command -v snap >/dev/null 2>&1; then
+        log "Running snap refresh (timeout 600s)..."
+        timeout 600 snap refresh >> "$LOG" 2>&1 || true
+        log "snap refresh completed"
+      fi
+    else
+      warn "No network connectivity detected; skipping live apt upgrades"
+    fi
+
+    # Unattended-upgrades configuration
+    if [ "$SELF_TEST" != "yes" ] && [ "$has_net" = "yes" ]; then
+      $APT install unattended-upgrades >/dev/null 2>&1
+    fi
+    mkdir -p /etc/apt/apt.conf.d
+    cat << 'EOF' > /etc/apt/apt.conf.d/20auto-upgrades
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+EOF
+    dpkg-reconfigure -f noninteractive unattended-upgrades >/dev/null 2>&1 || true
+    log "Configured /etc/apt/apt.conf.d/20auto-upgrades for automated security updates"
+  fi
+}
+
+# ---------------------------------------------------------------------
+# 16. POST-RUN SYSTEM HEALTH CHECK
+# ---------------------------------------------------------------------
+sec_health() {
+  echo -e "\n${Y}=== Module 16: Post-Run System Health Check ===${N}"
+  if [ "$SELF_TEST" = "yes" ]; then
+    log "skipped: no network/changes in self-test"
+    return 0
+  fi
+
+  local p_cnt=0 f_cnt=0 s_cnt=0
+
+  check_h() {
+    local name="$1" status="$2" note="$3"
+    if [ "$status" = "PASS" ]; then
+      echo -e "  [ ${G}PASS${N} ] $name"
+      log "HEALTH PASS: $name"
+      ((p_cnt++))
+    elif [ "$status" = "FAIL" ]; then
+      echo -e "  [ ${R}FAIL${N} ] $name ($note)"
+      warn "HEALTH FAIL: $name ($note)"
+      ((f_cnt++))
+    else
+      echo -e "  [ ${Y}SKIP${N} ] $name ($note)"
+      ((s_cnt++))
+    fi
+  }
+
+  # 1. Required services active
+  if [ "$SSH_REQUIRED" = "yes" ]; then
+    if systemctl is-active ssh >/dev/null 2>&1 || systemctl is-active sshd >/dev/null 2>&1; then
+      check_h "SSH Service Active" "PASS"
+    else
+      check_h "SSH Service Active" "FAIL" "service not running"
+    fi
+  else
+    check_h "SSH Service Active" "SKIP" "SSH not required"
+  fi
+
+  if [ "$REQ_APACHE" = "yes" ]; then
+    if systemctl is-active apache2 >/dev/null 2>&1; then check_h "Apache Service Active" "PASS"
+    else check_h "Apache Service Active" "FAIL" "apache2 inactive"; fi
+  fi
+
+  if [ "$REQ_NGINX" = "yes" ]; then
+    if systemctl is-active nginx >/dev/null 2>&1; then check_h "Nginx Service Active" "PASS"
+    else check_h "Nginx Service Active" "FAIL" "nginx inactive"; fi
+  fi
+
+  if [ "$REQ_FTP" = "yes" ]; then
+    if systemctl is-active vsftpd >/dev/null 2>&1; then check_h "VSFTPD Service Active" "PASS"
+    else check_h "VSFTPD Service Active" "FAIL" "vsftpd inactive"; fi
+  fi
+
+  if [ "$REQ_SAMBA" = "yes" ]; then
+    if systemctl is-active smbd >/dev/null 2>&1; then check_h "Samba Service Active" "PASS"
+    else check_h "Samba Service Active" "FAIL" "smbd inactive"; fi
+  fi
+
+  if [ "$REQ_MYSQL" = "yes" ]; then
+    if systemctl is-active mysql >/dev/null 2>&1 || systemctl is-active mariadb >/dev/null 2>&1; then check_h "MySQL/MariaDB Service Active" "PASS"
+    else check_h "MySQL/MariaDB Service Active" "FAIL" "database inactive"; fi
+  fi
+
+  # 2. Required ports listening
+  if [ "$SSH_REQUIRED" = "yes" ]; then
+    if ss -tuln 2>/dev/null | grep -q ":22 "; then check_h "SSH Port 22 Listening" "PASS"
+    else check_h "SSH Port 22 Listening" "FAIL" "port 22 not in LISTEN state"; fi
+  fi
+
+  for port_entry in $UFW_ALLOW; do
+    local p_num="${port_entry%%/*}"
+    if ss -tuln 2>/dev/null | grep -q ":${p_num} "; then
+      check_h "Required Port $port_entry Listening" "PASS"
+    else
+      check_h "Required Port $port_entry Listening" "FAIL" "port not listening"
+    fi
+  done
+
+  # 3. sshd -t configuration syntax
+  if command -v sshd >/dev/null 2>&1; then
+    if sshd -t >/dev/null 2>&1; then check_h "sshd Configuration Syntax (sshd -t)" "PASS"
+    else check_h "sshd Configuration Syntax (sshd -t)" "FAIL" "syntax error in sshd_config"; fi
+  else
+    check_h "sshd Configuration Syntax (sshd -t)" "SKIP" "sshd binary not present"
+  fi
+
+  # 4. visudo -c sudoers validity
+  if command -v visudo >/dev/null 2>&1; then
+    if visudo -cf /etc/sudoers >/dev/null 2>&1; then check_h "Sudoers Syntax Validation (visudo -c)" "PASS"
+    else check_h "Sudoers Syntax Validation (visudo -c)" "FAIL" "corrupted sudoers file"; fi
+  else
+    check_h "Sudoers Syntax Validation (visudo -c)" "SKIP" "visudo command missing"
+  fi
+
+  # 5. Authorized users exist
+  for u in $AUTHORIZED_USERS; do
+    if id -u "$u" >/dev/null 2>&1; then check_h "Authorized User Exists: $u" "PASS"
+    else check_h "Authorized User Exists: $u" "FAIL" "user $u not found in passwd"; fi
+  done
+
+  # 6. sudo/su sanity per admin
+  for a in $ADMIN_USERS; do
+    if id -nG "$a" 2>/dev/null | grep -E -q '(^|[[:space:]])(sudo|admin)([[:space:]]|$)'; then
+      check_h "Admin Sudo Membership: $a" "PASS"
+    else
+      check_h "Admin Sudo Membership: $a" "FAIL" "admin $a not in sudo/admin group"
+    fi
+  done
+
+  # 7. UFW status
+  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+    check_h "UFW Firewall Active" "PASS"
+  else
+    check_h "UFW Firewall Active" "FAIL" "UFW inactive or missing"
+  fi
+
+  echo -e "\n${G}Health Check Summary: $p_cnt PASS | $f_cnt FAIL | $s_cnt SKIP${N}"
+}
+
+# ---------------------------------------------------------------------
+# 17. FINAL SYSTEM VERIFICATION PRINTOUT
+# ---------------------------------------------------------------------
+sec_verify() {
+  echo -e "\n${Y}=== Module 17: Final System Verification Report ===${N}"
+  if [ "$SELF_TEST" = "yes" ]; then
+    log "skipped: no network/changes in self-test"
+    return 0
+  fi
+
+  # 1. Failed units
+  echo -e "\n${G}[*] Systemd Failed Units:${N}"
+  local failed_units
+  failed_units=$(systemctl --failed --no-legend 2>/dev/null || true)
+  if [ -z "$failed_units" ]; then
+    echo -e "  [ ${G}PASS${N} ] No failed systemd units"
+  else
+    echo -e "  [ ${R}FAIL${N} ] Detected failed systemd units:"
+    echo "$failed_units"
+  fi
+
+  # 2. Listening ports
+  echo -e "\n${G}[*] Active Listening Ports (TCP/UDP):${N}"
+  if command -v ss >/dev/null 2>&1; then
+    ss -tulnp 2>/dev/null | grep LISTEN || true
+    echo -e "  [ ${G}PASS${N} ] Captured active listening sockets"
+  else
+    echo -e "  [ ${Y}SKIP${N} ] ss command not found"
+  fi
+
+  # 3. Sudo group members
+  echo -e "\n${G}[*] Administrative Group Members:${N}"
+  local sudo_members
+  sudo_members=$(getent group sudo 2>/dev/null | cut -d: -f4)
+  local admin_members
+  admin_members=$(getent group admin 2>/dev/null | cut -d: -f4)
+  echo "  sudo  : ${sudo_members:-none}"
+  [ -n "$admin_members" ] && echo "  admin : $admin_members"
+  echo -e "  [ ${G}PASS${N} ] Verified administrative group memberships"
+
+  # 4. UID 0 accounts
+  echo -e "\n${G}[*] UID 0 Superuser Accounts:${N}"
+  local uid_zeros
+  uid_zeros=$(awk -F: '($3 == 0) { print $1 }' /etc/passwd)
+  echo "  Accounts with UID 0: $(echo "$uid_zeros" | tr '\n' ' ')"
+  if [ "$uid_zeros" = "root" ]; then
+    echo -e "  [ ${G}PASS${N} ] Only root possesses UID 0"
+  else
+    echo -e "  [ ${R}FAIL${N} ] Unauthorized UID 0 superuser accounts present: $uid_zeros"
+  fi
+
+  # 5. UFW status
+  echo -e "\n${G}[*] Firewall (UFW) Status & Rules:${N}"
+  if command -v ufw >/dev/null 2>&1; then
+    ufw status verbose 2>/dev/null || true
+    echo -e "  [ ${G}PASS${N} ] Captured UFW active ruleset"
+  else
+    echo -e "  [ ${Y}SKIP${N} ] UFW not installed"
+  fi
+
+  # 6. Effective sshd -T values
+  echo -e "\n${G}[*] Effective SSH Server Configurations (sshd -T):${N}"
+  if command -v sshd >/dev/null 2>&1; then
+    sshd -T 2>/dev/null | grep -E '^(permitrootlogin|protocol|passwordauthentication|x11forwarding|maxauthtries|clientaliveinterval|allowusers)' || true
+    echo -e "  [ ${G}PASS${N} ] Inspected active SSH daemon configuration"
+  else
+    echo -e "  [ ${Y}SKIP${N} ] SSH server not installed"
+  fi
+
+  # 7. Upgradable packages
+  echo -e "\n${G}[*] Remaining Upgradable Packages:${N}"
+  if command -v apt >/dev/null 2>&1; then
+    local up_pkgs
+    up_pkgs=$(apt list --upgradable 2>/dev/null | grep -v 'Listing...' || true)
+    local up_cnt
+    up_cnt=$(echo "$up_pkgs" | grep -c . || true)
+    if [ "$up_cnt" -eq 0 ]; then
+      echo -e "  [ ${G}PASS${N} ] System is fully updated (0 packages upgradable)"
+    else
+      echo -e "  [ ${Y}NOTE${N} ] $up_cnt package(s) available for upgrade"
+    fi
+  else
+    echo -e "  [ ${Y}SKIP${N} ] apt package manager unavailable"
+  fi
+}
+
+# ---------------------------------------------------------------------
+# EXECUTE MODULES
+# ---------------------------------------------------------------------
+sec_users
+sec_passwords
+sec_pam
+sec_sudoers
+sec_sysctl
+sec_perms
+sec_ssh
+sec_remove
+sec_backdoor
+sec_files
+sec_network
+sec_scanner
+sec_services
+sec_defenses
+sec_upgrade
+sec_health
+sec_verify
+
+echo -e "\n${G}====================================================${N}"
+echo -e "${G}   Hardening Completed Successfully!               ${N}"
+echo -e "${G}====================================================${N}"
+echo "Summary written to: $SUMMARY"
+echo "Log file written to: $LOG"
+
 
 

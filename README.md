@@ -1,8 +1,8 @@
 # CyberPatriot Hardening Suite & Guides (CP19 / 2026 Edition)
 
-Welcome to the **CyberPatriot Hardening Suite**. This repository contains four OS-specific, interactive hardening scripts designed to achieve **85–100 points** in CyberPatriot competition rounds with maximum speed, accuracy, and compliance with image-specific README requirements.
+Welcome to the **CyberPatriot Hardening Suite**. This repository contains five OS-specific, interactive hardening scripts designed to achieve **85–100 points** in CyberPatriot competition rounds with maximum speed, accuracy, and compliance with image-specific README requirements.
 
-> **Note on Operating System Compatibility**: The scripts in this repository are developed and tested specifically for **Ubuntu 20.04 / 22.04 / 24.04 LTS**, **Linux Mint 20 / 21**, **Windows 10 / 11 Workstations**, and **Windows Server 2016 / 2019 / 2022**. They are not officially supported for Debian or other non-targeted Linux distributions.
+> **Note on Operating System Compatibility**: The scripts in this repository are developed and tested specifically for **Ubuntu 20.04 / 22.04 / 24.04 LTS**, **Linux Mint 20 / 21**, **Debian 11 (Bullseye) / 12 (Bookworm)**, **Windows 10 / 11 Workstations**, and **Windows Server 2016 / 2019 / 2022**.
 
 ---
 
@@ -10,10 +10,11 @@ Welcome to the **CyberPatriot Hardening Suite**. This repository contains four O
 
 | Script Name | Target Operating Systems | Language / Shell | Key Features |
 | :--- | :--- | :--- | :--- |
-| **`UbuntuSuperScript`** | Ubuntu 20.04 / 22.04 / 24.04 LTS | Bash | Step 0 prompts, PAM faillock, `su` restriction, apt dependency guard, sysctl, UFW, AppArmor, backdoor sweep, service family map, rootkit/antivirus scanners, snap refresh |
-| **`MintSuperScript`** | Linux Mint 20 / 21 | Bash | Step 0 prompts, Mint Update Manager dconf database, `su` restriction, apt dependency guard, UFW, AppArmor, backdoor sweep, rootkit/antivirus scanners |
-| **`WindowsSuperScript`** | Windows 10 / 11 Workstations | PowerShell 5.1+ | Forensics snapshot (`CP-Evidence.txt`), SID-based User Rights Assignment via `secedit`, 40+ security registry options, UAC max, Defender & Firewall, OneDrive & App Removal |
-| **`WindowsServerSuperScript`** | Windows Server 2016 / 2019 / 2022 | PowerShell 5.1+ | Domain Controller policy, Domain Admins enforcement, LDAP signing/channel binding, DNS/IIS hardening, Windows Update policy, Server Features, Printer driver policy, Wecsvc |
+| **`UbuntuSuperScript`** | Ubuntu 20.04 / 22.04 / 24.04 LTS | Bash | 17 modules: Step 0 prompts, PAM faillock, `su` restriction, apt dependency guard, sysctl, GRUB boot hardening (`chmod 600 /boot/grub/grub.cfg`, `GRUB_CMDLINE_LINUX` sanitization, `update-grub`), UFW, AppArmor enforce (skipping kept service families), AST/tokenizer backdoor sweep (crontabs & user/system units), service family map, rootkit/antivirus scanners (`rkhunter`, `chkrootkit`, `clamscan`), `snap refresh`, required service hardening (Apache, vsftpd with `allow_writeable_chroot` & port 21 check, Samba, MySQL/MariaDB, PHP isolated syntax linting `php -n -c`, Nginx with drop-in config rollback), defenses pre-install & auditd rules, system upgrades with unattended-upgrades pre-install & reconfigure, post-run health check, final verification printout |
+| **`MintSuperScript`** | Linux Mint 20 / 21 | Bash | 17 modules: Step 0 prompts, Mint Update Manager dconf database, `su` restriction, apt dependency guard, sysctl, GRUB boot hardening (`chmod 600 /boot/grub/grub.cfg`, `GRUB_CMDLINE_LINUX` sanitization, `update-grub`), UFW, AppArmor enforce (skipping kept service families), AST/tokenizer backdoor sweep (crontabs & user/system units), rootkit/antivirus scanners (`rkhunter`, `chkrootkit`, `clamscan`), required service hardening (Apache, vsftpd with `allow_writeable_chroot` & port 21 check, Samba, MySQL/MariaDB, PHP isolated syntax linting `php -n -c`, Nginx with drop-in config rollback), defenses pre-install & auditd rules, system upgrades with unattended-upgrades pre-install & reconfigure, post-run health check, final verification printout |
+| **`DebianSuperScript`** | Debian 11 (Bullseye) / 12 (Bookworm) | Bash | 17 modules: Step 0 prompts, `su` restriction, apt dependency guard (Debian meta-packages protected), sysctl, GRUB boot hardening, UFW, AppArmor enforce (skipping kept service families), AST/tokenizer backdoor sweep (crontabs & user/system units), rootkit/antivirus scanners (`rkhunter`, `chkrootkit`, `clamscan`), required service hardening (Apache, vsftpd with `allow_writeable_chroot` & port 21 check, Samba, MySQL/MariaDB, PHP isolated syntax linting `php -n -c`, Nginx with drop-in config rollback), defenses pre-install & auditd rules, system upgrades with unattended-upgrades pre-install & reconfigure, post-run health check, final verification printout. No `snap refresh` (Debian does not use snap by default). Apt sources filtered against official Debian mirrors (`deb.debian.org`, `security.debian.org`). |
+| **`WindowsSuperScript`** | Windows 10 / 11 Workstations | PowerShell 5.1+ | Forensics snapshot (`CP-Evidence.txt`), SID-based User Rights Assignment via `secedit`, 40+ security registry options, UAC max, Defender & Inbound Firewall rule pruning, Adapter Bindings hardening (`-SmbRequired` / Step 0 prompt, never touches `ms_tcpip`), OneDrive management (startup/sync disabled, no uninstall), 7-Zip/LibreOffice upgrades |
+| **`WindowsServerSuperScript`** | Windows Server 2016 / 2019 / 2022 | PowerShell 5.1+ | Domain Controller policy, Domain Admins enforcement, LDAP signing/channel binding, DNS/IIS hardening, Windows Update policy, Server Features, Inbound Firewall rule pruning with role/port safeguards, Adapter Bindings hardening (`-SmbRequired` / Step 0 prompt, never touches `ms_tcpip`), Security Registry parity (`AlwaysInstallElevated`, `AllowTelemetry`, Screen Saver, WinRM, Netlogon) |
 
 ---
 
@@ -47,76 +48,148 @@ sudo ./MintSuperScript -y --users "mint alice" --admins "mint" --keep "ssh" --po
 ./MintSuperScript --self-test
 ```
 
-### 3. Windows SuperScript (Windows 10 / 11)
+### 3. Debian SuperScript
+```bash
+sudo chmod +x DebianSuperScript
+sudo ./DebianSuperScript
+```
+*Non-Interactive Mode:*
+```bash
+sudo ./DebianSuperScript -y --users "debian alice" --admins "debian" --keep "ssh" --ports "22/tcp" --password "Cyb3r-Pat!2026-xQz"
+```
+*Self-Test Dry Run (safe, non-interactive, dry-run only, writes to /tmp, works as non-root):*
+```bash
+./DebianSuperScript --self-test
+```
+
+### 4. Windows SuperScript (Windows 10 / 11)
 Launch PowerShell as **Administrator**:
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process -Force
+# Direct execution (as-is from repository root):
+& ([scriptblock]::Create((Get-Content .\WindowsSuperScript -Raw)))
+
+# Or copy/rename with .ps1 extension:
+Copy-Item .\WindowsSuperScript .\WindowsSuperScript.ps1
 .\WindowsSuperScript.ps1
 ```
 *Non-Interactive Mode:*
 ```powershell
-.\WindowsSuperScript.ps1 -Force -Users "alice,bob" -Admins "alice" -Keep "Spooler,sshd" -Ports "22,80" -Password "Cyb3r-Pat!2026-xQz"
+& ([scriptblock]::Create((Get-Content .\WindowsSuperScript -Raw))) -Force -SmbRequired -Users "alice,bob" -Admins "alice" -Keep "Spooler,sshd" -Ports "22,80" -Password "Cyb3r-Pat!2026-xQz"
 ```
-*Self-Test Dry Run:*
+*Self-Test Dry Run (safe, non-interactive, dry-run only, makes no changes):*
 ```powershell
-.\WindowsSuperScript.ps1 -SelfTest
+& ([scriptblock]::Create((Get-Content .\WindowsSuperScript -Raw))) -SelfTest -SmbRequired
 ```
 
-### 4. Windows Server SuperScript (Server 2016/2019/2022)
+### 5. Windows Server SuperScript (Server 2016/2019/2022)
 Launch PowerShell as **Administrator**:
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process -Force
+# Direct execution (as-is from repository root):
+& ([scriptblock]::Create((Get-Content .\WindowsServerSuperScript -Raw)))
+
+# Or copy/rename with .ps1 extension:
+Copy-Item .\WindowsServerSuperScript .\WindowsServerSuperScript.ps1
 .\WindowsServerSuperScript.ps1
 ```
 *Non-Interactive Mode:*
 ```powershell
-.\WindowsServerSuperScript.ps1 -Force -Users "alice,bob" -Admins "alice" -Keep "DNS,DHCP,W3SVC" -Ports "53,80" -Password "Cyb3r-Pat!2026-xQz"
+& ([scriptblock]::Create((Get-Content .\WindowsServerSuperScript -Raw))) -Force -SmbRequired -Users "alice,bob" -Admins "alice" -Keep "DNS,DHCP,W3SVC" -Ports "53,80" -Password "Cyb3r-Pat!2026-xQz"
 ```
-*Self-Test Dry Run:*
+*Self-Test Dry Run (safe, non-interactive, dry-run only, makes no changes):*
 ```powershell
-.\WindowsServerSuperScript.ps1 -SelfTest
+& ([scriptblock]::Create((Get-Content .\WindowsServerSuperScript -Raw))) -SelfTest -SmbRequired
 ```
 
 ---
 
 ## 🛡️ Feature & Capability Matrix
 
-| Feature / Hardening Control | `UbuntuSuperScript` | `MintSuperScript` | `WindowsSuperScript` | `WindowsServerSuperScript` |
-| :--- | :---: | :---: | :---: | :---: |
-| **Forensics Gate & Read-Only Network Scan** | Yes | Yes | Yes (`CP-Evidence.txt`) | Yes (`CP-Evidence.txt`) |
-| **Step 0 Interactive Specifics Prompts** | Yes | Yes | Yes | Yes |
-| **FAST MODE (Timed Judgment Prompts)** | Yes (10s auto-default) | Yes (10s auto-default) | Yes (10s auto-default) | Yes (10s auto-default) |
-| **Self-Test Dry-Run Flag** | `--self-test` | `--self-test` | `-SelfTest` | `-SelfTest` |
-| **User & Group Remediation** | Yes | Yes | Yes | Yes (AD & Local) |
-| **Password Aging & Complexity** | Min 10, Max 90, Remember 5 (`pam_pwhistory`) | Min 10, Max 90, Remember 5 (`pam_pwhistory`) | Min 14, Max 90, Remember 24 | Min 14, Max 90, Remember 24 |
-| **Account Lockout Policy** | `pam_faillock` (5 attempts / 15 min) | `pam_faillock` (5 attempts / 15 min) | `net accounts` (10 attempts / 30 min) | `net accounts` / AD Domain Policy (10 / 30 min) |
-| **`su` Privilege Restriction** | `pam_wheel.so` (group=sudo/admin) | `pam_wheel.so` (group=sudo/admin) | N/A | N/A |
-| **Sudoers ALL Rule & NOPASSWD Cleanup** | Yes (`visudo -cf` check) | Yes (`visudo -cf` check) | N/A | N/A |
-| **User Rights Assignment (SIDs)** | N/A | N/A | Full `secedit` (33+ SIDs) | Full `secedit` (33+ SIDs, DC-aware) |
-| **Security Registry Options (40+)** | N/A | N/A | UAC Max, CAD, LSA, WDigest, AutoAdminLogon=0 | UAC Max, CAD, LSA, LDAP Signing, Printer Driver Policy, Wecsvc |
-| **Sysctl Kernel Hardening** | IPv4 + IPv6 | IPv4 + IPv6 | N/A | N/A |
-| **Firewall Configuration** | UFW Default Deny & Pruning | UFW Default Deny & Pruning | Defender Firewall (App Rules Disabled) | Defender Firewall (App Rules Disabled) |
-| **Backdoor & Persistence Sweep** | Netcat `dpkg -S`, Cron, Systemd | Netcat `dpkg -S`, Cron, Systemd | IFEO, WMI, Tasks, Run Keys, Startup Folders | IFEO, WMI, Tasks, Run Keys, Startup Folders |
-| **Prohibited Software Removal** | Purges prohibited & unrequired services | Purges prohibited & unrequired services | CCleaner, WebCompanion, OpenTFTP, BitTorrent, Wireshark | CCleaner, WebCompanion, OpenTFTP, BitTorrent, Wireshark |
-| **Software Version Audit & Upgrades** | `apt-get upgrade` | `apt-get upgrade` | 7-Zip, LibreOffice (`winget`/`choco`) | 7-Zip, LibreOffice (`winget`/`choco`) |
-| **Rootkit & Malware Scanning** | `rkhunter`, `chkrootkit`, `clamscan`, `snap refresh` | `rkhunter`, `chkrootkit`, `clamscan` | N/A | N/A |
+| Feature / Hardening Control | `UbuntuSuperScript` | `MintSuperScript` | `DebianSuperScript` | `WindowsSuperScript` | `WindowsServerSuperScript` |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Forensics Gate & Read-Only Network Scan** | Yes | Yes | Yes | Yes (`CP-Evidence.txt`) | Yes (`CP-Evidence.txt`) |
+| **Step 0 Interactive Specifics Prompts** | Yes | Yes | Yes | Yes | Yes |
+| **FAST MODE (Timed Judgment Prompts)** | Yes (10s auto-default) | Yes (10s auto-default) | Yes (10s auto-default) | Yes (10s auto-default) | Yes (10s auto-default) |
+| **Self-Test Dry-Run Flag** | `--self-test` | `--self-test` | `--self-test` | `-SelfTest` | `-SelfTest` |
+| **User & Group Remediation (Module 1 / Sec 1)** | Yes | Yes | Yes | Yes | Yes (AD & Local) |
+| **Password Aging & Complexity (Module 2 / Sec 2)** | Min 10, Max 90, Remember 5 (`pam_pwhistory`) | Min 10, Max 90, Remember 5 (`pam_pwhistory`) | Min 10, Max 90, Remember 5 (`pam_pwhistory`) | Min 14, Max 90, Remember 24 | Min 14, Max 90, Remember 24 |
+| **Account Lockout Policy (Module 3 / Sec 2)** | `pam_faillock` (5 attempts / 15 min) | `pam_faillock` (5 attempts / 15 min) | `pam_faillock` (5 attempts / 15 min) | `net accounts` (10 attempts / 30 min) | `net accounts` / AD Domain Policy (10 / 30 min) |
+| **`su` Privilege Restriction (Module 3)** | `pam_wheel.so` (group=sudo/admin) | `pam_wheel.so` (group=sudo/admin) | `pam_wheel.so` (group=sudo/admin) | N/A | N/A |
+| **Sudoers ALL Rule & NOPASSWD Cleanup (Module 4)** | Yes (`visudo -cf` check) | Yes (`visudo -cf` check) | Yes (`visudo -cf` check) | N/A | N/A |
+| **User Rights Assignment (SIDs) (Sec 3)** | N/A | N/A | N/A | Full `secedit` (33+ SIDs) | Full `secedit` (33+ SIDs, DC-aware) |
+| **Security Registry Options (40+) (Sec 4)** | N/A | N/A | N/A | UAC Max, CAD, LSA, WDigest, AutoAdminLogon=0, AlwaysInstallElevated=0, AllowTelemetry=0 | UAC Max, CAD, LSA, LDAP Signing, Printer Driver Policy, Wecsvc, AlwaysInstallElevated=0, AllowTelemetry=0, Screen Saver, WinRM, Netlogon |
+| **System File Permissions & GRUB Hardening (Module 6)** | `chmod 600 /boot/grub/grub.cfg`, remove `init=`, `single`, `rw init` from `GRUB_CMDLINE_LINUX*`, `update-grub`, shadow/passwd/sudoers perms | `chmod 600 /boot/grub/grub.cfg`, remove `init=`, `single`, `rw init` from `GRUB_CMDLINE_LINUX*`, `update-grub`, shadow/passwd/sudoers perms | Same as Ubuntu | N/A | N/A |
+| **Sysctl Kernel Hardening (Module 5)** | IPv4 + IPv6 | IPv4 + IPv6 | IPv4 + IPv6 | N/A | N/A |
+| **Firewall Configuration (Module 11 / Sec 5)** | UFW Default Deny & Pruning | UFW Default Deny & Pruning | UFW Default Deny & Pruning | Defender Firewall (App Rules Pruned) | Defender Firewall (App Rules Pruned, Role/Port Safeguards) |
+| **Adapter Bindings Hardening (Sec 6)** | N/A | N/A | N/A | Disables bindings; preserves `ms_server`/`ms_msclient` only if `-SmbRequired`; never touches `ms_tcpip` | Disables bindings; preserves `ms_server`/`ms_msclient` only if `-SmbRequired`; never touches `ms_tcpip` |
+| **Backdoor & Persistence Sweep (Module 9 / Sec 7)** | Netcat `dpkg -S`, Tokenizer/AST Cron & Systemd Sweep (/root & /home user units) | Netcat `dpkg -S`, Tokenizer/AST Cron & Systemd Sweep (/root & /home user units) | Same as Ubuntu | IFEO, WMI, Tasks, Run Keys, Startup Folders | IFEO, WMI, Tasks, Run Keys, Startup Folders |
+| **Prohibited Software Removal (Module 8 / Sec 8)** | Purges prohibited & unrequired services | Purges prohibited & unrequired services | Purges prohibited & unrequired services | CCleaner, WebCompanion, OpenTFTP, BitTorrent, Wireshark | CCleaner, WebCompanion, OpenTFTP, BitTorrent, Wireshark |
+| **Software Version Upgrades (Module 15 / Sec 9)** | `apt-get upgrade`, `dist-upgrade`, guarded `autoremove` | `apt-get upgrade`, `dist-upgrade`, guarded `autoremove` | `apt-get upgrade`, `dist-upgrade`, guarded `autoremove` | 7-Zip, LibreOffice (`winget`/`choco`, deduplicated) | 7-Zip, LibreOffice (`winget`/`choco`, deduplicated) |
+| **Rootkit & Malware Scanning (Module 12)** | Module 12: `rkhunter`, `chkrootkit`, `clamscan` (600s timeouts, report-only), `snap refresh` | Module 12: `rkhunter`, `chkrootkit`, `clamscan` (600s timeouts, report-only) | Module 12: `rkhunter`, `chkrootkit`, `clamscan` (600s timeouts, report-only, no snap) | N/A | N/A |
+| **Required Service Hardening (Module 13)** | Module 13: Apache (`TraceEnable Off`), vsftpd (`anonymous_enable=NO`, `chroot_local_user=YES`, `allow_writeable_chroot=YES`, active/port 21 test), Samba, MySQL/MariaDB (`bind-address 127.0.0.1`), PHP (`php -n -c` linting), Nginx (`server_tokens` drop-in rollback) | Module 13: Apache (`TraceEnable Off`), vsftpd (`anonymous_enable=NO`, `chroot_local_user=YES`, `allow_writeable_chroot=YES`, active/port 21 test), Samba, MySQL/MariaDB (`bind-address 127.0.0.1`), PHP (`php -n -c` linting), Nginx (`server_tokens` drop-in rollback) | Same as Ubuntu | N/A | DNS, IIS, Wecsvc hardening |
+| **Defenses, Logging & Access Controls (Module 14)** | Module 14: Pre-install defense pkgs, AppArmor (`aa-enforce` skipping kept family profiles), auditd rules, fail2ban, rsyslog, LightDM/GDM guest/autologin off, `usb-storage`/firewire/thunderbolt blacklist, coredump off | Module 14: Pre-install defense pkgs, AppArmor (`aa-enforce` skipping kept family profiles), auditd rules, fail2ban, rsyslog, LightDM/GDM guest/autologin off, `usb-storage`/firewire/thunderbolt blacklist, coredump off | Same as Ubuntu | Exploit Guard, Defender Realtime/Cloud/MAPS, LSA Protection | Exploit Guard, Defender Realtime/Cloud/MAPS, LSA Protection, LDAP Signing/Enforcement |
+| **Package Upgrades & Policies (Module 15)** | Module 15: `apt-get update & upgrade -y`, `dist-upgrade`, guarded `autoremove`, pre-install & reconfigure `unattended-upgrades`, `snap refresh` | Module 15: `apt-get update & upgrade -y`, `dist-upgrade`, guarded `autoremove`, pre-install & reconfigure `unattended-upgrades`, Mint Update Manager dconf | Module 15: `apt-get update & upgrade -y`, `dist-upgrade`, guarded `autoremove`, pre-install & reconfigure `unattended-upgrades` (no snap) | 7-Zip, LibreOffice upgrades (`winget`/`choco`) | 7-Zip, LibreOffice upgrades (`winget`/`choco`) |
+| **Post-Run System Health Check (Module 16 / Sec 10)** | Module 16: Required services active, required ports listening, `sshd -t`, `visudo -c`, users exist, admin sudo/su sanity, UFW active | Module 16: Required services active, required ports listening, `sshd -t`, `visudo -c`, users exist, admin sudo/su sanity, UFW active | Same as Ubuntu | Section 10: Automatic Health Check (Firewall, Defender, RDP, Admins) | Section 10: Automatic Health Check (Firewall, Defender, RDP, Domain Admins) |
+| **Final System Verification Report (Module 17 / Sec 11)** | Module 17: Failed systemd units, listening ports (`ss -tulnp`), sudo group, UID 0 accounts, UFW verbose status, `sshd -T`, upgradable packages | Module 17: Failed systemd units, listening ports (`ss -tulnp`), sudo group, UID 0 accounts, UFW verbose status, `sshd -T`, upgradable packages | Same as Ubuntu | Section 11: Final Verification Report (Shares, Firewall profiles) | Section 11: Final Verification Report (Shares, Firewall profiles) |
 
 ---
 
 ## 🔍 Scored Competition Item Coverage Matrix (Automated / Report-Only / Manual)
 
-| Category / Scored Item | Windows (`WindowsSuperScript` & `Server`) | Linux (`UbuntuSuperScript` & `Mint`) | Status |
+| Category / Scored Item | Windows (`WindowsSuperScript` & `Server`) | Linux (`UbuntuSuperScript`, `MintSuperScript` & `DebianSuperScript`) | Status |
 | :--- | :--- | :--- | :--- |
 | **Forensics Questions** | Discovers Forensics Q files on Desktop | Discovers Forensics Q files on Desktop | **Manual** |
-| **Unauthorized Users / Admins** | Audit & remove non-authorized users/admins | Audit & remove non-authorized users/admins | **Automated** |
-| **User Passwords & Complexity** | Enforces complexity, min age, lockout, no null | Enforces complexity, aging, `pam_pwhistory`, `no nullok` | **Automated** |
-| **Audit Policies** | Credential validation, logon failure, all categories | `auditd` enabled and configured | **Automated** |
-| **UAC & Security Policies** | UAC secure desktop, CTRL+ALT+DEL, hide last user | `pam_wheel` for `su`, sudoers NOPASSWD cleanup | **Automated** |
-| **Firewall & Network Security** | Defender Firewall enabled, app rules pruned | UFW default deny, pruned unallowed rules | **Automated** |
-| **Remote Access (RDP / SSH)** | RDP disabled or NLA+SSL required per README | SSH root login disabled, protocol 2, AllowUsers | **Automated** |
-| **Insecure Services & Shares** | SMB1 off, W3SVC/FTP/SNMP/Telnet disabled | Unauthorized services purged, family map respected | **Automated** |
-| **Prohibited Software Removal** | CCleaner, WebCompanion, OpenTFTP, BitTorrent, Wireshark | Prohibited tools & unneeded service packages purged | **Automated** |
-| **Prohibited File Search** | Non-system MP3s, installers, archives deleted | Non-system MP3s, installers, archives deleted | **Automated** |
-| **Software Upgrades** | 7-Zip, LibreOffice, Firefox updated via winget/choco | APT package upgrade simulation & execution | **Automated** |
-| **Malware & Backdoor Sweeps** | IFEO, WMI, Tasks, Run keys swept | Netcat purged, anchored cron/systemd sweep, `rkhunter`/`chkrootkit`/`clamscan` | **Automated / Report-Only** |
+| **Unauthorized Users / Admins** | Audit & remove non-authorized users/admins | Audit & remove non-authorized users/admins (Module 1) | **Automated** |
+| **User Passwords & Complexity** | Enforces complexity, min age, lockout, no null | Enforces complexity, aging, `pam_pwhistory`, `no nullok` (Modules 2, 3) | **Automated** |
+| **Audit Policies** | Credential validation, logon failure, all categories | `auditd` enabled and configured for identity/sudoers/logins/time (Module 14) | **Automated** |
+| **UAC & Security Policies** | UAC secure desktop, CTRL+ALT+DEL, hide last user | `pam_wheel` for `su`, sudoers NOPASSWD cleanup (Modules 3, 4) | **Automated** |
+| **Firewall & Network Security** | Defender Firewall enabled, consumer app rules pruned (Server protects required roles/ports), Adapter Bindings hardened | UFW default deny, pruned unallowed rules (Module 11) | **Automated** |
+| **Remote Access (RDP / SSH)** | RDP disabled or NLA+SSL required per README | SSH root login disabled, protocol 2, AllowUsers (Module 7) | **Automated** |
+| **Insecure Services & Shares** | SMB1 off, W3SVC/FTP/SNMP/Telnet disabled | Unauthorized services purged, family map respected (Module 8) | **Automated** |
+| **Required Service Hardening** | DNS, IIS, Wecsvc hardened | Apache, vsftpd (`chroot_local_user=YES`, `allow_writeable_chroot=YES`, active & port 21 check), Samba, MySQL/MariaDB, PHP (`php -n -c` linting), Nginx (drop-in config rollback) (Module 13) | **Automated** |
+| **System Defenses & Access** | Exploit Guard, Defender, LSA Protection | Pre-install defense packages, AppArmor enforce (skips kept family profiles), fail2ban, rsyslog, guest/autologin off, kernel blacklists, coredumps off (Module 14) | **Automated** |
+| **Prohibited Software Removal** | CCleaner, WebCompanion, OpenTFTP, BitTorrent, Wireshark | Prohibited tools & unneeded service packages purged (Module 8) | **Automated** |
+| **Prohibited File Search** | Non-system MP3s, installers, archives deleted | Non-system MP3s, installers, archives deleted (Module 10) | **Automated** |
+| **Software Upgrades** | 7-Zip, LibreOffice, Firefox updated via winget/choco (deduplicated, native exit codes) | `apt-get upgrade`, `dist-upgrade`, guarded `autoremove`, pre-install & reconfigure `unattended-upgrades`, `snap refresh` (Module 15) | **Automated** |
+| **Malware & Backdoor Sweeps** | IFEO, WMI, Tasks, Run keys swept | Netcat purged, AST/tokenizer cron & user/system units sweep, `rkhunter`/`chkrootkit`/`clamscan` (Modules 9, 12) | **Automated / Report-Only** |
+| **Health Check & Verification** | Health check (Section 10) and Verification (Section 11) | Service health check (Module 16) and system verification report (Module 17) | **Automated** |
 | **Localhost Driver License & Perl Backdoor Hunt** | N/A | Manual investigation required | **Manual** |
+
+---
+
+## 🧪 Quality Assurance & Test Verification
+
+All scripts in this repository undergo automated verification checks prior to release:
+
+1. **Bash Syntax & Shellcheck Verification**:
+   - `UbuntuSuperScript`, `MintSuperScript`, and `DebianSuperScript` all pass `bash -n` checks with zero syntax errors.
+   - All three Linux scripts pass `shellcheck -S error` with zero errors.
+   ```bash
+   bash -n UbuntuSuperScript
+   bash -n MintSuperScript
+   bash -n DebianSuperScript
+   shellcheck -S error UbuntuSuperScript
+   shellcheck -S error MintSuperScript
+   shellcheck -S error DebianSuperScript
+   ```
+2. **Tokenizer & Persistence Integrity**:
+   - `check_suspicious_file` and `clean_suspicious_file` use POSIX `awk` tokenizers to parse command paths rather than relying on brittle substring matching.
+   - Accurately matches single-argument script interpreters (`python -c`, `python3 -c`, `perl -e`, `ruby -e`, `php -r`), reverse shells (`nc -e`, `bash -i >& /dev/tcp/`), download pipes (`curl ... | sh`), and `ExecStart` binaries under `/tmp`, `/dev/shm`, and `/var/tmp`.
+   - Preserves legitimate commands (`# run once a day`, `ExecStart=/bin/sync`, `ExecStart=/usr/bin/python3 /usr/lib/ubuntu-advantage/x.py`, `0 3 * * * root rm -rf /tmp/cache`, `17 * * * * root find /tmp/ -mtime +7 -delete`).
+   - Recursively sweeps user systemd units under both `/root/.config/systemd/user` and `/home/*/.config/systemd/user`.
+3. **Linux Dry-Run Verification**:
+   - Verified via `./UbuntuSuperScript --self-test`, `./MintSuperScript --self-test`, and `./DebianSuperScript --self-test` as non-root with zero destructive actions.
+   - All modules report `"skipped: no network/changes in self-test"` during dry-run testing.
+4. **Configuration Helper Verification (`set_kv` & `set_ini`)**:
+   - Verified across tab-separated keys (`PASS_MAX_DAYS 90`), commented keys (`# minlen = 8`), key-value assignment (`anonymous_enable=NO`), idempotent re-runs, complex values with backslashes and special characters, and section isolation (`[global]` vs `[share]`, `[mysqld]` vs `[client]`).
+5. **PowerShell AST Parser Validation**:
+   - Both `WindowsSuperScript` and `WindowsServerSuperScript` are validated against `[System.Management.Automation.Language.Parser]::ParseFile` on Windows PowerShell 5.1 with zero syntax errors.
+   - *(Note: PSScriptAnalyzer module is not installed in the testing environment and is marked as untested; AST parser validation and -SelfTest execution were directly verified.)*
+6. **Deduplication & Safety Auditing**:
+   - Verified that OneDrive management blocks and 7-Zip/LibreOffice upgrade blocks have an exact occurrence count of 1.
+   - Confirmed OneDrive handling terminates processes and disables startup/sync policies without triggering breaking uninstalls.
+   - Standardized native CLI calls (`winget`, `choco`, `UsoClient`) without PowerShell `-ErrorAction` flags and with `$LASTEXITCODE` validation.
+   - Network adapter bindings properly skip `ms_server` and `ms_msclient` when `-SmbRequired` is set; never modifies `ms_tcpip`.
+7. **Windows Dry-Run Verification**:
+   - Verified via `-SelfTest` (with and without `-SmbRequired`) on both `WindowsSuperScript` and `WindowsServerSuperScript`, generating review output without modifying system configurations.
