@@ -27,12 +27,13 @@ sudo ./UbuntuSuperScript
 ```
 *Non-Interactive Mode:*
 ```bash
-sudo ./UbuntuSuperScript -y --users "alice bob" --admins "alice" --keep "ssh apache2" --ports "22/tcp 80/tcp" --password "Cyb3r-Pat!2026-xQz"
+sudo ./UbuntuSuperScript -y --users "alice bob" --admins "alice" --keep "ssh apache2" --ports "22/tcp 80/tcp"
 ```
 *Self-Test Dry Run (safe, non-interactive, dry-run only, writes to /tmp, works as non-root):*
 ```bash
 ./UbuntuSuperScript --self-test
 ```
+To reset selected accounts' passwords in non-interactive mode, add `--reset-password-users "alice"` and provide a new password with `--password "your-new-password"`. To add required supplementary group memberships, use `--group-memberships "alice:developers"`. Interactive mode prompts for these selections; passwords are never set to a built-in default.
 
 ### 2. Linux Mint SuperScript
 ```bash
@@ -55,12 +56,13 @@ sudo ./DebianSuperScript
 ```
 *Non-Interactive Mode:*
 ```bash
-sudo ./DebianSuperScript -y --users "debian alice" --admins "debian" --keep "ssh" --ports "22/tcp" --password "Cyb3r-Pat!2026-xQz"
+sudo ./DebianSuperScript -y --users "debian alice" --admins "debian" --keep "ssh" --ports "22/tcp"
 ```
 *Self-Test Dry Run (safe, non-interactive, dry-run only, writes to /tmp, works as non-root):*
 ```bash
 ./DebianSuperScript --self-test
 ```
+To reset selected accounts' passwords in non-interactive mode, add `--reset-password-users "alice"` and provide a new password with `--password "your-new-password"`. To add required supplementary group memberships, use `--group-memberships "alice:developers"`. Interactive mode prompts for these selections; passwords are never set to a built-in default.
 
 ### 4. Windows SuperScript (Windows 10 / 11)
 Launch PowerShell as **Administrator**:
@@ -113,7 +115,7 @@ Copy-Item .\WindowsServerSuperScript .\WindowsServerSuperScript.ps1
 | **FAST MODE (Timed Judgment Prompts)** | Yes (10s auto-default) | Yes (10s auto-default) | Yes (10s auto-default) | Yes (10s auto-default) | Yes (10s auto-default) |
 | **Self-Test Dry-Run Flag** | `--self-test` | `--self-test` | `--self-test` | `-SelfTest` | `-SelfTest` |
 | **User & Group Remediation (Module 1 / Sec 1)** | Yes | Yes | Yes | Yes | Yes (AD & Local) |
-| **Password Aging & Complexity (Module 2 / Sec 2)** | Min 10, Max 90, Remember 5 (`pam_pwhistory`) | Min 10, Max 90, Remember 5 (`pam_pwhistory`) | Min 10, Max 90, Remember 5 (`pam_pwhistory`) | Min 14, Max 90, Remember 24 | Min 14, Max 90, Remember 24 |
+| **Password Aging & Complexity (Module 2 / Sec 2)** | Min 12, Max 90, Remember 5 (`pam_pwhistory`) | Min 10, Max 90, Remember 5 (`pam_pwhistory`) | Min 12, Max 90, Remember 5 (`pam_pwhistory`) | Min 14, Max 90, Remember 24 | Min 14, Max 90, Remember 24 |
 | **Account Lockout Policy (Module 3 / Sec 2)** | `pam_faillock` (5 attempts / 15 min) | `pam_faillock` (5 attempts / 15 min) | `pam_faillock` (5 attempts / 15 min) | `net accounts` (10 attempts / 30 min) | `net accounts` / AD Domain Policy (10 / 30 min) |
 | **`su` Privilege Restriction (Module 3)** | `pam_wheel.so` (group=sudo/admin) | `pam_wheel.so` (group=sudo/admin) | `pam_wheel.so` (group=sudo/admin) | N/A | N/A |
 | **Sudoers ALL Rule & NOPASSWD Cleanup (Module 4)** | Yes (`visudo -cf` check) | Yes (`visudo -cf` check) | Yes (`visudo -cf` check) | N/A | N/A |

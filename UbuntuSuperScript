@@ -418,6 +418,8 @@ CLI_ADMINS=""
 CLI_KEEP=""
 CLI_PORTS=""
 CLI_PASSWORD=""
+CLI_PASSWORD_USERS=""
+CLI_GROUP_MEMBERSHIPS=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -428,6 +430,8 @@ while [[ $# -gt 0 ]]; do
     --keep) CLI_KEEP=$(echo "$2" | tr ',;\t\r\n' '     ' | tr -s ' '); shift 2 ;;
     --ports) CLI_PORTS=$(echo "$2" | tr ',;\t\r\n' '     ' | tr -s ' '); shift 2 ;;
     --password) CLI_PASSWORD="$2"; shift 2 ;;
+    --reset-password-users) CLI_PASSWORD_USERS=$(echo "$2" | tr ',;\t\r\n' '     ' | tr -s ' '); shift 2 ;;
+    --group-memberships) CLI_GROUP_MEMBERSHIPS=$(echo "$2" | tr ',;\t\r\n' '     ' | tr -s ' '); shift 2 ;;
     *) shift ;;
   esac
 done
@@ -497,6 +501,8 @@ ADMIN_USERS="$CLI_ADMINS"
 KEEP_SERVICES="$CLI_KEEP"
 UFW_ALLOW="$CLI_PORTS"
 NEW_PASSWORD="$CLI_PASSWORD"
+PASSWORD_RESET_USERS="$CLI_PASSWORD_USERS"
+GROUP_MEMBERSHIPS="$CLI_GROUP_MEMBERSHIPS"
 
 local_interactive_users=$(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd 2>/dev/null | tr '\n' ' ')
 [ -n "$local_interactive_users" ] && echo -e "${Y}Current interactive accounts found on system:${N} $local_interactive_users"
@@ -505,7 +511,6 @@ get_input "Enter ALL Authorized Users (space or comma-separated, e.g. 'alice, bo
 get_input "Enter Authorized Administrators ONLY (space or comma-separated, e.g. 'alice')" ADMIN_USERS "${SUDO_USER:-ubuntu}"
 get_input "Enter Required Services/Packages to KEEP (space-separated, e.g. 'apache2 ssh')" KEEP_SERVICES "ssh"
 get_input "Enter Additional Firewall Ports to ALLOW (space-separated, e.g. '80/tcp 443/tcp 22/tcp')" UFW_ALLOW "22/tcp"
-get_input "Enter Default Password for Authorized Accounts (will not be logged)" NEW_PASSWORD "Cyb3r-Pat!2026-xQz"
 
 AUTHORIZED_USERS=$(echo "$AUTHORIZED_USERS" | tr ',;\t\r\n' '     ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 ADMIN_USERS=$(echo "$ADMIN_USERS" | tr ',;\t\r\n' '     ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -513,6 +518,8 @@ KEEP_SERVICES=$(echo "$KEEP_SERVICES" | tr ',;\t\r\n' '     ' | tr -s ' ' | sed 
 UFW_ALLOW=$(echo "$UFW_ALLOW" | tr ',;\t\r\n' '     ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
 if [ "$NON_INTERACTIVE" != "yes" ] && [ "$SELF_TEST" != "yes" ]; then
+  read -rp "Enter authorized accounts whose passwords should be reset (space/comma-separated, blank to skip): " PASSWORD_RESET_USERS </dev/tty
+  read -rp "Enter required user:group memberships to add (space/comma-separated, blank if none): " GROUP_MEMBERSHIPS </dev/tty
   ask "Is SSH explicitly required on this system?" "Y" && SSH_REQUIRED="yes" || SSH_REQUIRED="no"
   ask "Is Apache web server required?" "N" && REQ_APACHE="yes" || REQ_APACHE="no"
   ask "Is Nginx web server required?" "N" && REQ_NGINX="yes" || REQ_NGINX="no"
@@ -525,11 +532,11 @@ if [ "$NON_INTERACTIVE" != "yes" ] && [ "$SELF_TEST" != "yes" ]; then
   read -rp "Enter PROHIBITED Software/Packages from README (space-separated, e.g., 'nmap wireshark'): " EXTRA_PROHIBITED </dev/tty
   read -rp "Enter REQUIRED Software/Packages from README to preserve: " REQUIRED_SOFTWARE </dev/tty
 
-  read -rp "Enter Password Policy Overrides (MinLength MaxDays MinDays WarnDays or press Enter for defaults 10 90 7 14): " PW_OVERRIDES </dev/tty
+  read -rp "Enter Password Policy Overrides (MinLength MaxDays MinDays WarnDays or press Enter for defaults 12 90 7 14): " PW_OVERRIDES </dev/tty
   if [ -n "$PW_OVERRIDES" ]; then
     read -r MIN_LEN MAX_DAYS MIN_DAYS WARN_DAYS <<< "$PW_OVERRIDES"
   fi
-  MIN_LEN="${MIN_LEN:-10}"
+  MIN_LEN="${MIN_LEN:-12}"
   MAX_DAYS="${MAX_DAYS:-90}"
   MIN_DAYS="${MIN_DAYS:-7}"
   WARN_DAYS="${WARN_DAYS:-14}"
@@ -543,11 +550,14 @@ else
   SSH_REQUIRED="yes"
   FAST_MODE="yes"
   ALL_MODULES="yes"
-  MIN_LEN=10; MAX_DAYS=90; MIN_DAYS=7; WARN_DAYS=14
+  MIN_LEN=12; MAX_DAYS=90; MIN_DAYS=7; WARN_DAYS=14
   REQ_APACHE="no"; REQ_NGINX="no"; REQ_FTP="no"; REQ_SAMBA="no"; REQ_MYSQL="no"; REQ_PHP="no"
   REQUIRED_SOFTWARE=""
   CREATE_ITEMS=""
 fi
+
+PASSWORD_RESET_USERS=$(echo "$PASSWORD_RESET_USERS" | tr ',;\t\r\n' '     ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+GROUP_MEMBERSHIPS=$(echo "$GROUP_MEMBERSHIPS" | tr ',;\t\r\n' '     ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
 # Infer required services from KEEP_SERVICES and REQUIRED_SOFTWARE
 for s in $KEEP_SERVICES $REQUIRED_SOFTWARE; do
@@ -580,6 +590,8 @@ echo -e "${G}               STEP 0 SUMMARY REVIEW                ${N}"
 echo -e "${G}====================================================${N}"
 echo "Authorized Users     : $AUTHORIZED_USERS"
 echo "Authorized Admins    : $ADMIN_USERS"
+echo "Password Reset Users: ${PASSWORD_RESET_USERS:-none}"
+echo "Requested Memberships: ${GROUP_MEMBERSHIPS:-none}"
 echo "Kept Package Families: $KEPT_FAMILIES $KEEP_SERVICES $REQUIRED_SOFTWARE"
 echo "Allowed Firewall Ports: $UFW_ALLOW"
 echo "SSH Required         : $SSH_REQUIRED"
@@ -601,6 +613,7 @@ aircrack-ng wireshark wireshark-qt wireshark-common tshark nikto medusa ettercap
 ettercap-text-only fcrackzip sqlmap netcat netcat-traditional netcat-openbsd ncat $EXTRA_PROHIBITED"
 
 BAD_SERVICE_PKGS="apache2* lighttpd nginx* php* mysql-server* mysql-client* mariadb-server* mariadb-client* postgresql* mongodb* vsftpd proftpd* pure-ftpd* tftpd-hpa ftpd samba samba-common* smbd nfs-kernel-server nfs-common rpcbind postfix exim4* sendmail* dovecot* bind9* isc-dhcp-server slapd squid xinetd openbsd-inetd telnetd inetutils-telnetd rsh-server rsh-client talk talkd snmpd cups* avahi-daemon bluez"
+read -r -a PURGE_PATTERNS <<< "$PROHIBITED_PKGS $BAD_SERVICE_PKGS"
 
 # ---------------------------------------------------------------------
 # SELF-TEST FLAG IMPLEMENTATION
@@ -620,7 +633,7 @@ if [ "$SELF_TEST" = "yes" ]; then
     return 1
   }
 
-  for candidate_pattern in php-amqp nmap ncat; do
+  for candidate_pattern in "${PURGE_PATTERNS[@]}"; do
     dpkg-query -W -f='${Package}\n' "$candidate_pattern" 2>/dev/null | while read -r inst_p; do
       if [ -n "$inst_p" ]; then
         if is_kept_pkg "$inst_p"; then
@@ -670,21 +683,58 @@ sec_users() {
     # Process CREATE_ITEMS after Step 0 confirmation
     for item in $CREATE_ITEMS; do
       local u_name="${item%%:*}"
+      local created_user="no"
       if [[ "$item" == *":"* ]]; then
         u="${item%%:*}"; g="${item##*:}"
         getent group "$g" >/dev/null || { groupadd "$g" && log "Created group $g"; }
-        id "$u" &>/dev/null || { useradd -m -s /bin/bash "$u" && log "Created user $u"; }
+        if ! id "$u" &>/dev/null; then
+          useradd -m -s /bin/bash "$u" && log "Created user $u" && created_user="yes"
+        fi
         usermod -aG "$g" "$u" && log "Added $u to group $g"
         AUTHORIZED_USERS="$AUTHORIZED_USERS $u"
         if [ "$g" = "sudo" ] || [ "$g" = "admin" ]; then
           ADMIN_USERS="$ADMIN_USERS $u"
         fi
       else
-        id "$item" &>/dev/null || { useradd -m -s /bin/bash "$item" && log "Created user $item"; }
+        if ! id "$item" &>/dev/null; then
+          useradd -m -s /bin/bash "$item" && log "Created user $item" && created_user="yes"
+        fi
         AUTHORIZED_USERS="$AUTHORIZED_USERS $item"
       fi
-      echo "$u_name:$NEW_PASSWORD" | chpasswd 2>/dev/null
+      if [ "$created_user" = "yes" ] && [ -n "$NEW_PASSWORD" ]; then
+        printf '%s:%s\n' "$u_name" "$NEW_PASSWORD" | chpasswd 2>/dev/null
+      elif [ "$created_user" = "yes" ] && [ "$NON_INTERACTIVE" != "yes" ]; then
+        if ! passwd "$u_name"; then
+          passwd -l "$u_name" >/dev/null 2>&1
+          warn "Could not set a password for new account $u_name; password login is locked"
+        fi
+      elif [ "$created_user" = "yes" ]; then
+        passwd -l "$u_name" >/dev/null 2>&1
+        warn "Created account $u_name with password login locked; set its password before use"
+      fi
       chage -m "$MIN_DAYS" -M "$MAX_DAYS" -W "$WARN_DAYS" "$u_name" 2>/dev/null
+    done
+
+    for membership in $GROUP_MEMBERSHIPS; do
+      if [[ "$membership" != *":"* ]]; then
+        warn "Skipping invalid membership '$membership' (expected user:group)"
+        continue
+      fi
+      local member="${membership%%:*}"
+      local group="${membership#*:}"
+      if ! id "$member" >/dev/null 2>&1 || [ -z "$group" ]; then
+        warn "Skipping membership '$membership' because the user or group is invalid"
+        continue
+      fi
+      if ! getent group "$group" >/dev/null; then
+        warn "Skipping membership '$membership' because group '$group' does not exist"
+        continue
+      fi
+      if usermod -aG "$group" "$member"; then
+        log "Added requested group membership: $member:$group"
+      else
+        warn "Failed to add requested group membership: $member:$group"
+      fi
     done
 
     # Audit non-root UID 0 accounts
@@ -759,10 +809,26 @@ sec_users() {
 # ---------------------------------------------------------------------
 sec_passwords() {
   echo -e "\n${Y}=== Module 2: Password Security & Aging ===${N}"
-  if ask "Reset passwords for authorized users and enforce password aging across ALL accounts?"; then
-    for u in $AUTHORIZED_USERS $ADMIN_USERS; do
-      if id "$u" &>/dev/null; then
-        echo "$u:$NEW_PASSWORD" | chpasswd && log "Changed password for authorized user $u"
+  if ask "Reset passwords for the selected accounts and enforce password aging?"; then
+    for u in $PASSWORD_RESET_USERS; do
+      if ! id "$u" >/dev/null 2>&1; then
+        warn "Skipping password reset for unknown account: $u"
+        continue
+      fi
+      if [ -n "$CLI_PASSWORD" ]; then
+        if printf '%s:%s\n' "$u" "$CLI_PASSWORD" | chpasswd; then
+          log "Changed password for selected user $u"
+        else
+          warn "Failed to change password for selected user $u"
+        fi
+      elif [ "$NON_INTERACTIVE" != "yes" ]; then
+        if passwd "$u"; then
+          log "Changed password for selected user $u"
+        else
+          warn "Failed to change password for selected user $u"
+        fi
+      else
+        chage -d 0 "$u" && log "Required selected user $u to change their password at next login"
       fi
     done
 
@@ -771,7 +837,7 @@ sec_passwords() {
       chage -m "$MIN_DAYS" -M "$MAX_DAYS" -W "$WARN_DAYS" "$u" 2>/dev/null && log "Enforced password aging for $u (min:$MIN_DAYS max:$MAX_DAYS warn:$WARN_DAYS)"
     done
 
-    echo -e "${Y}[!] A password reset was applied to your account. Use your default password for subsequent logins.${N}"
+    [ -n "$PASSWORD_RESET_USERS" ] || log "No password resets requested; password aging policy was applied"
   fi
 }
 
@@ -1096,9 +1162,15 @@ sec_remove() {
       return 1
     }
 
-    for candidate_pattern in php-amqp nmap ncat; do
-      dpkg-query -W -f='${Package}\n' "$candidate_pattern" 2>/dev/null | while read -r inst_p; do
-        if [ -n "$inst_p" ]; then
+    local purge_candidates
+    purge_candidates=$(
+      for candidate_pattern in "${PURGE_PATTERNS[@]}"; do
+        dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\n' "$candidate_pattern" 2>/dev/null |
+          awk '$1 ~ /i$/ { print $2 }'
+      done | sort -u
+    )
+    while IFS= read -r inst_p; do
+        [ -n "$inst_p" ] || continue
           if is_kept_family "$inst_p"; then
             log "Skipped purge of $inst_p (matches kept family or service)"
             continue
@@ -1120,10 +1192,7 @@ sec_remove() {
             systemctl disable --now "$inst_p" 2>/dev/null
             $APT purge "$inst_p" >/dev/null 2>&1 && log "Purged prohibited package: $inst_p"
           fi
-        fi
-      done
-    done
-    $APT autoremove >/dev/null 2>&1
+    done <<< "$purge_candidates"
   fi
 }
 
@@ -2197,6 +2266,3 @@ echo -e "${G}   Hardening Completed Successfully!               ${N}"
 echo -e "${G}====================================================${N}"
 echo "Summary written to: $SUMMARY"
 echo "Log file written to: $LOG"
-
-
-
