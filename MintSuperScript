@@ -677,7 +677,7 @@ if [ "$SELF_TEST" = "yes" ]; then
   echo -e "\n3. Target Configuration Files & Operations to be Hardened:"
   echo "   - /etc/login.defs, /etc/security/pwquality.conf, /etc/pam.d/su"
   echo "   - /etc/sudoers, /etc/sudoers.d/*"
-  echo "   - /etc/sysctl.d/99-cp-hardening.conf"
+  echo "   - /etc/sysctl.d/99-cp-hardening.conf, /etc/sysctl.conf"
   echo "   - /etc/ssh/sshd_config, /etc/ssh/sshd_config.d/*"
   echo "   - /etc/apt/sources.list, /etc/apt/sources.list.d/*"
   echo "   - /etc/hosts, /etc/resolv.conf, /etc/systemd/resolved.conf"
@@ -1102,6 +1102,8 @@ net.ipv6.conf.default.accept_redirects = 0
 net.ipv6.conf.all.accept_source_route = 0
 net.ipv6.conf.default.accept_source_route = 0
 EOF
+    set_kv "net.ipv4.tcp_syncookies" "1" /etc/sysctl.conf " = "
+    set_kv "net.ipv4.ip_forward" "0" /etc/sysctl.conf " = "
     if sysctl --system >> "$LOG" 2>&1; then
       local syn_cookies forwarding
       syn_cookies=$(sysctl -n net.ipv4.tcp_syncookies 2>/dev/null)
@@ -1521,12 +1523,16 @@ sec_network() {
     if [ "$SELF_TEST" = "yes" ]; then
       log "skipped: no network in self-test"
     else
-      apt_out=$(apt-get update 2>&1)
-      if echo "$apt_out" | grep -qE "NO_PUBKEY|not signed|signatures were invalid"; then
-        warn "APT update detected repository key/signature issue:"
-        echo "$apt_out" | grep -E "NO_PUBKEY|not signed|signatures were invalid" | sed 's/^/    /'
+      if apt_out=$(apt-get update 2>&1); then
+        if echo "$apt_out" | grep -qE "NO_PUBKEY|not signed|signatures were invalid"; then
+          warn "APT update detected repository key/signature issue:"
+          echo "$apt_out" | grep -E "NO_PUBKEY|not signed|signatures were invalid" | sed 's/^/    /'
+        else
+          log "APT repository signature check completed cleanly"
+        fi
       else
-        log "APT repository signature check completed cleanly"
+        warn "APT metadata refresh failed before firewall setup; see $LOG"
+        echo "$apt_out" | tail -n 10 | sed 's/^/    /'
       fi
     fi
 
@@ -1610,7 +1616,10 @@ sec_network() {
     fi
 
     # UFW Firewall Pruning
-    if ! $APT install ufw >> "$LOG" 2>&1; then
+    if ! DEBIAN_FRONTEND=noninteractive apt-get update >> "$LOG" 2>&1; then
+      warn "APT metadata refresh failed before UFW installation; attempting installation with available package metadata"
+    fi
+    if ! $APT install ufw >> "$LOG" 2>&1 || ! command -v ufw >/dev/null 2>&1; then
       warn "Could not install UFW; firewall configuration was skipped"
       return 1
     fi
