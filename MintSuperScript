@@ -58,7 +58,18 @@ ask_timed() {
   [[ "$reply" =~ ^[Yy] ]]
 }
 
-inlist() { [[ " $2 " == *" $1 "* ]]; }
+inlist() {
+  local target="$1"
+  local item
+  local clean_list
+  clean_list=$(echo "$2" | tr ',;\t\r\n' '     ')
+  for item in $clean_list; do
+    if [ "$item" = "$target" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
 
 is_kept_family() {
   local p="$1"
@@ -408,10 +419,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -y|--yes|--non-interactive) NON_INTERACTIVE="yes"; ALL_MODULES="yes"; FAST_MODE="yes"; shift ;;
     --self-test) SELF_TEST="yes"; shift ;;
-    --users) CLI_USERS="$2"; shift 2 ;;
-    --admins) CLI_ADMINS="$2"; shift 2 ;;
-    --keep) CLI_KEEP="$2"; shift 2 ;;
-    --ports) CLI_PORTS="$2"; shift 2 ;;
+    --users) CLI_USERS=$(echo "$2" | tr ',;\t\r\n' '     ' | tr -s ' '); shift 2 ;;
+    --admins) CLI_ADMINS=$(echo "$2" | tr ',;\t\r\n' '     ' | tr -s ' '); shift 2 ;;
+    --keep) CLI_KEEP=$(echo "$2" | tr ',;\t\r\n' '     ' | tr -s ' '); shift 2 ;;
+    --ports) CLI_PORTS=$(echo "$2" | tr ',;\t\r\n' '     ' | tr -s ' '); shift 2 ;;
     --password) CLI_PASSWORD="$2"; shift 2 ;;
     *) shift ;;
   esac
@@ -483,11 +494,19 @@ KEEP_SERVICES="$CLI_KEEP"
 UFW_ALLOW="$CLI_PORTS"
 NEW_PASSWORD="$CLI_PASSWORD"
 
-get_input "Enter ALL Authorized Users (space-separated, e.g. 'alice bob chard')" AUTHORIZED_USERS "${SUDO_USER:-mint}"
-get_input "Enter Authorized Administrators ONLY (space-separated, e.g. 'alice')" ADMIN_USERS "${SUDO_USER:-mint}"
+local_interactive_users=$(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd 2>/dev/null | tr '\n' ' ')
+[ -n "$local_interactive_users" ] && echo -e "${Y}Current interactive accounts found on system:${N} $local_interactive_users"
+
+get_input "Enter ALL Authorized Users (space or comma-separated, e.g. 'alice, bob, charlie')" AUTHORIZED_USERS "${SUDO_USER:-mint}"
+get_input "Enter Authorized Administrators ONLY (space or comma-separated, e.g. 'alice')" ADMIN_USERS "${SUDO_USER:-mint}"
 get_input "Enter Required Services/Packages to KEEP (space-separated, e.g. 'apache2 ssh')" KEEP_SERVICES "ssh"
 get_input "Enter Additional Firewall Ports to ALLOW (space-separated, e.g. '80/tcp 443/tcp 22/tcp')" UFW_ALLOW "22/tcp"
 get_input "Enter Default Password for Authorized Accounts (will not be logged)" NEW_PASSWORD "Cyb3r-Pat!2026-xQz"
+
+AUTHORIZED_USERS=$(echo "$AUTHORIZED_USERS" | tr ',;\t\r\n' '     ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+ADMIN_USERS=$(echo "$ADMIN_USERS" | tr ',;\t\r\n' '     ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+KEEP_SERVICES=$(echo "$KEEP_SERVICES" | tr ',;\t\r\n' '     ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+UFW_ALLOW=$(echo "$UFW_ALLOW" | tr ',;\t\r\n' '     ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
 if [ "$NON_INTERACTIVE" != "yes" ] && [ "$SELF_TEST" != "yes" ]; then
   ask "Is SSH explicitly required on this system?" "Y" && SSH_REQUIRED="yes" || SSH_REQUIRED="no"
@@ -669,7 +688,7 @@ sec_users() {
       warn "Found non-root UID 0 account: $u0!"
       if ask_timed "Lock and remove non-root UID 0 account $u0?"; then
         pkill -KILL -u "$u0" 2>/dev/null
-        userdel -f -r "$u0" 2>/dev/null && log "Removed UID 0 account $u0"
+        userdel -f "$u0" 2>/dev/null && log "Removed UID 0 account $u0 (home directory preserved)"
       fi
     done
 
@@ -686,13 +705,14 @@ sec_users() {
       if [ "$FAST_MODE" = "yes" ]; then
         do_del="Y"
       else
-        ask "Delete UNAUTHORIZED user '$u' and home directory?" "Y" && do_del="Y" || do_del="N"
+        ask "Delete UNAUTHORIZED user account '$u' (home directory will be preserved)?" "Y" && do_del="Y" || do_del="N"
       fi
 
       if [ "$do_del" = "Y" ]; then
         pkill -KILL -u "$u" 2>/dev/null
-        userdel -r "$u" 2>/dev/null || userdel -f -r "$u" 2>/dev/null
-        log "Removed unauthorized user $u"
+        # Remove user account from system while preserving home directory to prevent catastrophic scoring penalties
+        userdel "$u" 2>/dev/null || userdel -f "$u" 2>/dev/null
+        log "Removed unauthorized user account $u (home directory preserved)"
       fi
     done
 
