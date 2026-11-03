@@ -10,7 +10,6 @@ export DEBIAN_FRONTEND=noninteractive
 APT="apt-get -y -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef"
 LOG="/var/log/cp_mint_hardening.log"
 SUMMARY="/tmp/summary.txt"
-mkdir -p /tmp/cp-notes
 
 R=$'\033[1;31m'; G=$'\033[1;32m'; Y=$'\033[1;33m'; N=$'\033[0m'
 
@@ -439,6 +438,7 @@ clean_suspicious_file() {
 # ---------------------------------------------------------------------
 NON_INTERACTIVE="no"
 SELF_TEST="no"
+AUDIT_ONLY="no"
 CLI_USERS=""
 CLI_ADMINS=""
 CLI_KEEP=""
@@ -451,6 +451,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -y|--yes|--non-interactive) NON_INTERACTIVE="yes"; ALL_MODULES="yes"; FAST_MODE="yes"; shift ;;
     --self-test) SELF_TEST="yes"; shift ;;
+    --audit-only) AUDIT_ONLY="yes"; shift ;;
     --users) CLI_USERS=$(echo "$2" | tr ',;\t\r\n' '     ' | tr -s ' '); shift 2 ;;
     --admins) CLI_ADMINS=$(echo "$2" | tr ',;\t\r\n' '     ' | tr -s ' '); shift 2 ;;
     --keep) CLI_KEEP=$(echo "$2" | tr ',;\t\r\n' '     ' | tr -s ' '); shift 2 ;;
@@ -461,6 +462,33 @@ while [[ $# -gt 0 ]]; do
     *) shift ;;
   esac
 done
+
+if [ "$AUDIT_ONLY" = "yes" ]; then
+  umask 077
+  audit_report=$(mktemp /tmp/cp-audit-XXXXXX.txt) || { echo "Error: Could not create the audit report."; exit 1; }
+  {
+    echo "CyberPatriot Linux Mint read-only audit report"
+    echo "Collected: $(date -Is)"
+    echo "Host: $(hostname)"
+    echo "Identity: $(id)"
+    if [ "$EUID" -ne 0 ]; then echo "NOTICE: non-root execution limits visibility of some checks."; fi
+    echo; echo "=== OS and kernel ==="; cat /etc/os-release 2>/dev/null; uname -a
+    echo; echo "=== Accounts and UID 0 ==="; getent passwd; awk -F: '$3 == 0 {print $1 ":" $3 ":" $6 ":" $7}' /etc/passwd
+    echo; echo "=== Interactive local accounts ==="; awk -F: '$7 !~ /(nologin|false)$/ {print $1 ":" $3 ":" $6 ":" $7}' /etc/passwd
+    echo; echo "=== Privileged groups and sudo rules ==="; getent group sudo; getent group adm; grep -RnsE '^[[:space:]]*[^#[:space:]]|NOPASSWD|!authenticate' /etc/sudoers /etc/sudoers.d 2>/dev/null
+    echo; echo "=== Password status and policy ==="; grep -E '^[[:space:]]*(PASS_MAX_DAYS|PASS_MIN_DAYS|PASS_WARN_AGE)' /etc/login.defs 2>/dev/null; awk -F: '$2 == "" {print "EMPTY_PASSWORD_FIELD:" $1}' /etc/shadow 2>/dev/null; for user in $(awk -F: '$3 >= 1000 && $3 < 65534 {print $1}' /etc/passwd); do passwd -S "$user" 2>/dev/null; chage -l "$user" 2>/dev/null; done
+    echo; echo "=== Running/enabled services, sockets, and timers ==="; systemctl --type=service --state=running --no-pager 2>&1; systemctl list-unit-files --type=service --state=enabled --no-pager 2>&1; systemctl list-sockets --all --no-pager 2>&1; systemctl list-timers --all --no-pager 2>&1
+    echo; echo "=== Listening sockets and firewall ==="; ss -lntup 2>&1; ufw status verbose 2>&1; nft list ruleset 2>&1; iptables -S 2>&1
+    echo; echo "=== Installed security-relevant packages and available updates ==="; dpkg-query -W -f='${binary:Package} ${Version}\n' 2>/dev/null | grep -Ei 'openssh|apache|nginx|samba|vsftpd|telnet|snmp|nmap|netcat|socat|wireshark|fail2ban|auditd|apparmor' || true; apt list --upgradable 2>&1
+    echo; echo "=== SSH effective settings and authorized-key paths ==="; if command -v sshd >/dev/null 2>&1; then sshd -T 2>&1 | grep -E '^(port|permitrootlogin|passwordauthentication|permitemptypasswords|maxauthtries|authorizedkeysfile) '; fi; find /home /root -path '*/.ssh/authorized_keys' -type f -print 2>&1
+    echo; echo "=== Scheduled and systemd persistence locations ==="; for path in /etc/crontab /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/systemd/system; do [ ! -e "$path" ] || ls -la "$path" 2>&1; done; systemctl --failed --no-pager 2>&1
+    echo; echo "=== Writable/SUID/capability review leads ==="; find /etc /usr/local /opt /home -xdev -type f -perm -0002 -print 2>&1; find /usr /usr/local /opt /home -xdev -type f -perm -4000 -print 2>&1; if command -v getcap >/dev/null 2>&1; then getcap -r /usr /usr/local /opt /home 2>&1; fi
+    echo; echo "=== AppArmor, audit, and recent warnings ==="; aa-status 2>&1; systemctl is-active auditd 2>&1; journalctl -b -p warning --no-pager -n 100 2>&1
+  } > "$audit_report" 2>&1
+  cat "$audit_report"
+  echo "Read-only audit complete. No remediation modules were run. Report: $audit_report"
+  exit 0
+fi
 
 echo -e "${G}====================================================${N}"
 echo -e "${G}    CyberPatriot Mint SuperScript (Interactive)     ${N}"
@@ -2038,6 +2066,69 @@ EOF
       fi
     done
 
+    if command -v dconf >/dev/null 2>&1 && command -v gsettings >/dev/null 2>&1; then
+      mkdir -p /etc/dconf/profile /etc/dconf/db/local.d/locks
+      local dconf_section=""
+      if gsettings list-schemas 2>/dev/null | grep -Fxq 'org.cinnamon.desktop.session'; then
+        dconf_section="cinnamon"
+        cat > /etc/dconf/db/local.d/00-cp-desktop-security <<'EOF'
+[org/cinnamon/desktop/session]
+idle-delay=uint32 300
+
+[org/cinnamon/desktop/screensaver]
+lock-enabled=true
+lock-delay=uint32 0
+
+[org/cinnamon/desktop/media-handling]
+autorun-never=true
+automount-open=false
+EOF
+        cat > /etc/dconf/db/local.d/locks/00-cp-desktop-security <<'EOF'
+/org/cinnamon/desktop/session/idle-delay
+/org/cinnamon/desktop/screensaver/lock-enabled
+/org/cinnamon/desktop/screensaver/lock-delay
+/org/cinnamon/desktop/media-handling/autorun-never
+/org/cinnamon/desktop/media-handling/automount-open
+EOF
+      elif gsettings list-schemas 2>/dev/null | grep -Fxq 'org.gnome.desktop.session'; then
+        dconf_section="gnome"
+        cat > /etc/dconf/db/local.d/00-cp-desktop-security <<'EOF'
+[org/gnome/desktop/session]
+idle-delay=uint32 300
+
+[org/gnome/desktop/screensaver]
+lock-enabled=true
+lock-delay=uint32 0
+
+[org/gnome/desktop/media-handling]
+autorun-never=true
+automount-open=false
+EOF
+        cat > /etc/dconf/db/local.d/locks/00-cp-desktop-security <<'EOF'
+/org/gnome/desktop/session/idle-delay
+/org/gnome/desktop/screensaver/lock-enabled
+/org/gnome/desktop/screensaver/lock-delay
+/org/gnome/desktop/media-handling/autorun-never
+/org/gnome/desktop/media-handling/automount-open
+EOF
+      fi
+
+      if [ -n "$dconf_section" ]; then
+        if [ ! -f /etc/dconf/profile/user ]; then
+          printf 'user-db:user\nsystem-db:local\n' > /etc/dconf/profile/user
+        else
+          grep -qxF 'user-db:user' /etc/dconf/profile/user || printf '\nuser-db:user\n' >> /etc/dconf/profile/user
+          grep -qxF 'system-db:local' /etc/dconf/profile/user || printf '\nsystem-db:local\n' >> /etc/dconf/profile/user
+        fi
+        chmod 644 /etc/dconf/db/local.d/00-cp-desktop-security /etc/dconf/db/local.d/locks/00-cp-desktop-security
+        if dconf update; then
+          log "Configured $dconf_section 5-minute screen lock and disabled removable-media autorun"
+        else
+          warn "dconf update failed; verify desktop lock and removable-media settings manually"
+        fi
+      fi
+    fi
+
     # 7. Disable USB storage, Firewire and Thunderbolt kernel modules
     cat << 'EOF' > /etc/modprobe.d/cp-blacklist.conf
 install usb-storage /bin/false
@@ -2132,6 +2223,23 @@ sec_upgrade() {
         fi
         upgrade_installed_package openssh-server
         upgrade_installed_package openssh-client
+        if ! command -v snap >/dev/null 2>&1 || ! snap list firefox >/dev/null 2>&1; then
+          upgrade_installed_package firefox
+        fi
+        if command -v snap >/dev/null 2>&1 && snap list firefox >/dev/null 2>&1; then
+          if timeout 600 snap refresh firefox >> "$LOG" 2>&1; then
+            log "Updated Firefox snap"
+          else
+            warn "Failed to update Firefox snap; see $LOG"
+          fi
+        fi
+        if command -v flatpak >/dev/null 2>&1 && flatpak list --app --columns=application 2>/dev/null | grep -Fxq "org.mozilla.firefox"; then
+          if flatpak update --noninteractive org.mozilla.firefox >> "$LOG" 2>&1; then
+            log "Updated Firefox Flatpak"
+          else
+            warn "Failed to update Firefox Flatpak; see $LOG"
+          fi
+        fi
         if command -v flatpak >/dev/null 2>&1 && flatpak list --app --columns=application 2>/dev/null | grep -Fxq "org.chromium.Chromium"; then
           if flatpak update --noninteractive org.chromium.Chromium >> "$LOG" 2>&1; then
             log "Updated Chromium Flatpak"
@@ -2165,7 +2273,7 @@ sec_upgrade() {
         done
         [ "$openssh_installed" = "yes" ] || warn "OpenSSH packages are not installed; no OpenSSH package update was applied"
 
-        for protected_package in chromium chromium-browser openssh-server openssh-client; do
+        for protected_package in chromium chromium-browser firefox openssh-server openssh-client; do
           package_status=$(dpkg-query -W -f='${db:Status-Abbrev}' "$protected_package" 2>/dev/null || true)
           [[ "$package_status" == ii* ]] && apt-mark manual "$protected_package" >/dev/null 2>&1
         done
@@ -2211,10 +2319,189 @@ EOF
 }
 
 # ---------------------------------------------------------------------
-# 16. POST-RUN SYSTEM HEALTH CHECK
+# 18. POST-RUN SYSTEM HEALTH CHECK
 # ---------------------------------------------------------------------
+sec_extended_audit() {
+  echo -e "\n${Y}=== Module 16: Extended Persistence & Integrity Audit (Report Only) ===${N}"
+  if [ "$SELF_TEST" = "yes" ]; then
+    log "skipped: no network/changes in self-test"
+    return 0
+  fi
+  if ! ask_timed "Review shell/desktop startup, remote access, APT hooks, and package integrity?" "Y"; then
+    return 0
+  fi
+
+  local f cmd
+  for f in /etc/profile /etc/bash.bashrc /etc/profile.d/*.sh /root/.bashrc /root/.profile /home/*/.bashrc /home/*/.profile /home/*/.bash_profile; do
+    [ -f "$f" ] || continue
+    if check_suspicious_file "$f"; then
+      warn "Review suspicious shell startup file: $f"
+      grep -nEi 'nc|ncat|netcat|socat|/dev/(tcp|udp)|curl|wget|base64|python|perl|ruby|php|/tmp|/dev/shm|/var/tmp' "$f" 2>/dev/null | head -n 20 | sed 's/^/    /'
+    fi
+  done
+
+  for f in /etc/xdg/autostart/*.desktop /root/.config/autostart/*.desktop /home/*/.config/autostart/*.desktop; do
+    [ -f "$f" ] || continue
+    if grep -qiE 'Exec=.*(/tmp/|/dev/shm/|/var/tmp/|nc|ncat|netcat|socat|curl|wget)' "$f" 2>/dev/null; then
+      warn "Review suspicious desktop autostart entry: $f"
+      grep -E '^(Name|Exec|Hidden|X-GNOME-Autostart-enabled)=' "$f" 2>/dev/null | sed 's/^/    /'
+    fi
+  done
+
+  for f in /root/.ssh/authorized_keys /home/*/.ssh/authorized_keys; do
+    [ -f "$f" ] || continue
+    log "Review SSH authorized keys file: $f"
+    ssh-keygen -lf "$f" 2>/dev/null | sed 's/^/    /' || true
+  done
+
+  if [ -f /etc/inetd.conf ]; then
+    grep -Ev '^[[:space:]]*(#|$)' /etc/inetd.conf | while IFS= read -r f; do
+      warn "Active inetd entry requires review: $f"
+    done
+  fi
+  if [ -d /etc/xinetd.d ]; then
+    grep -RniE 'disable[[:space:]]*=[[:space:]]*no|socket_type|server[[:space:]]*=' /etc/xinetd.d 2>/dev/null | head -n 100 | while IFS= read -r f; do
+      warn "Review xinetd configuration: $f"
+    done
+  fi
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl list-timers --all --no-pager 2>/dev/null | sed -n '1,80p'
+  fi
+  if command -v atq >/dev/null 2>&1; then
+    atq 2>/dev/null | sed 's/^/Scheduled at job: /'
+  fi
+  for cmd in xrdp x11vnc tightvncserver tigervnc-standalone-server vino anydesk teamviewer teamviewer-host; do
+    if dpkg-query -W -f='${db:Status-Abbrev}' "$cmd" 2>/dev/null | grep -q '^ii'; then
+      log "Installed remote-access package for scenario review: $cmd"
+    fi
+  done
+
+  if [ -d /etc/apt/apt.conf.d ]; then
+    grep -RniE 'DPkg::Pre-Invoke|DPkg::Post-Invoke|APT::Update::Pre-Invoke|APT::Update::Post-Invoke' /etc/apt/apt.conf.d 2>/dev/null | head -n 100 | while IFS= read -r f; do
+      warn "Review APT hook: $f"
+    done
+  fi
+  if grep -RnE '^[[:space:]]*auth[[:space:]]+(sufficient|optional)[[:space:]]+pam_permit\.so' /etc/pam.d 2>/dev/null; then
+    warn "Potential PAM authentication bypass found; review the reported pam_permit entries"
+  fi
+  if [ -s /etc/ld.so.preload ]; then
+    warn "/etc/ld.so.preload is non-empty; investigate each listed library"
+    sed -n '1,50p' /etc/ld.so.preload
+  fi
+  for cmd in sudo su passwd ssh sshd apt apt-get systemctl; do
+    for f in "/usr/local/bin/$cmd" "/usr/local/sbin/$cmd"; do
+      [ -e "$f" ] && warn "Local executable may shadow system command: $f"
+    done
+  done
+  if command -v dpkg >/dev/null 2>&1; then
+    dpkg --verify 2>/dev/null | grep -v ' c ' | head -n 100 | while IFS= read -r f; do
+      warn "Package integrity difference to review: $f"
+    done
+  fi
+  for cmd in snap flatpak; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+      "$cmd" list 2>/dev/null | grep -Ei 'transmission|qbittorrent|deluge|frostwire|anydesk|teamviewer|vnc|nmap|wireshark|hydra|ophcrack|aircrack|metasploit' | while IFS= read -r f; do
+        warn "Review potentially prohibited $cmd application: $f"
+      done
+    fi
+  done
+  log "Extended persistence and integrity checks completed; findings are report-only"
+}
+
+sec_browser_policies() {
+  echo -e "\n${Y}=== Module 17: Browser Security Policies & Extension Inventory ===${N}"
+  if [ "$SELF_TEST" = "yes" ]; then
+    log "skipped: no network/changes in self-test"
+    return 0
+  fi
+  if ! ask_timed "Apply managed browser security policies to installed browsers?" "Y"; then
+    return 0
+  fi
+
+  local policy_dir policy_file policy_dirs f
+  policy_dirs=""
+  if command -v chromium >/dev/null 2>&1 || dpkg-query -W -f='${db:Status-Abbrev}' chromium 2>/dev/null | grep -q '^ii'; then
+    policy_dirs="$policy_dirs /etc/chromium/policies/managed"
+  fi
+  if command -v chromium-browser >/dev/null 2>&1 || dpkg-query -W -f='${db:Status-Abbrev}' chromium-browser 2>/dev/null | grep -q '^ii'; then
+    policy_dirs="$policy_dirs /etc/chromium-browser/policies/managed"
+  fi
+  if command -v google-chrome >/dev/null 2>&1 || dpkg-query -W -f='${db:Status-Abbrev}' google-chrome-stable 2>/dev/null | grep -q '^ii'; then
+    policy_dirs="$policy_dirs /etc/opt/chrome/policies/managed"
+  fi
+  for policy_dir in $policy_dirs; do
+      mkdir -p "$policy_dir"
+      policy_file="$policy_dir/99-cyberpatriot-security.json"
+      if [ -e "$policy_file" ]; then
+        warn "Preserved existing browser policy; merge required settings manually: $policy_file"
+        continue
+      fi
+      cat > "$policy_file" <<'EOF'
+{
+  "DefaultPopupsSetting": 2,
+  "DefaultNotificationsSetting": 2,
+  "SafeBrowsingEnabled": true,
+  "PasswordManagerEnabled": false,
+  "AutofillAddressEnabled": false,
+  "SyncDisabled": true
+}
+EOF
+      chmod 644 "$policy_file"
+      if command -v python3 >/dev/null 2>&1 && ! python3 -m json.tool "$policy_file" >/dev/null 2>&1; then
+        warn "Chromium policy JSON validation failed: $policy_file"
+      else
+        log "Installed additive Chromium/Chrome policy drop-in: $policy_file"
+      fi
+  done
+
+  if command -v firefox >/dev/null 2>&1 || dpkg-query -W -f='${db:Status-Abbrev}' firefox 2>/dev/null | grep -q '^ii' ||
+     { command -v snap >/dev/null 2>&1 && snap list firefox >/dev/null 2>&1; } ||
+     { command -v flatpak >/dev/null 2>&1 && flatpak list --app --columns=application 2>/dev/null | grep -Fxq 'org.mozilla.firefox'; }; then
+    policy_dir="/etc/firefox/policies"
+    policy_file="$policy_dir/policies.json"
+    mkdir -p "$policy_dir"
+    if [ -e "$policy_file" ]; then
+      warn "Preserved existing Firefox policies; merge required settings manually: $policy_file"
+    else
+      cat > "$policy_file" <<'EOF'
+{
+  "policies": {
+    "PopupBlocking": {"Default": true, "Locked": true},
+    "PasswordManagerEnabled": false,
+    "OfferToSaveLoginsDefault": false,
+    "DisableSecurityBypass": {"SafeBrowsing": true, "InvalidCertificate": true},
+    "Preferences": {
+      "browser.safebrowsing.malware.enabled": {"Value": true, "Status": "locked"},
+      "browser.safebrowsing.phishing.enabled": {"Value": true, "Status": "locked"},
+      "dom.security.https_only_mode": {"Value": true, "Status": "locked"},
+      "xpinstall.whitelist.required": {"Value": true, "Status": "locked"}
+    }
+  }
+}
+EOF
+      chmod 644 "$policy_file"
+      if command -v python3 >/dev/null 2>&1 && ! python3 -m json.tool "$policy_file" >/dev/null 2>&1; then
+        warn "Firefox policy JSON validation failed: $policy_file"
+      else
+        log "Installed Firefox security policy: $policy_file"
+      fi
+    fi
+  fi
+
+  for f in /home/*/.config/chromium/*/Extensions /home/*/.config/google-chrome/*/Extensions /root/.config/chromium/*/Extensions; do
+    [ -d "$f" ] || continue
+    find "$f" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | while IFS= read -r policy_file; do
+      log "Review browser extension (not removed automatically): $f/$policy_file"
+    done
+  done
+  if pgrep -x chromium >/dev/null 2>&1 || pgrep -x chromium-browser >/dev/null 2>&1 || pgrep -x chrome >/dev/null 2>&1; then
+    warn "Restart the running Chromium/Chrome browser to load managed policies"
+  fi
+}
+
 sec_health() {
-  echo -e "\n${Y}=== Module 16: Post-Run System Health Check ===${N}"
+  echo -e "\n${Y}=== Module 18: Post-Run System Health Check ===${N}"
   if [ "$SELF_TEST" = "yes" ]; then
     log "skipped: no network/changes in self-test"
     return 0
@@ -2331,10 +2618,10 @@ sec_health() {
 }
 
 # ---------------------------------------------------------------------
-# 17. FINAL SYSTEM VERIFICATION PRINTOUT
+# 19. FINAL SYSTEM VERIFICATION PRINTOUT
 # ---------------------------------------------------------------------
 sec_verify() {
-  echo -e "\n${Y}=== Module 17: Final System Verification Report ===${N}"
+  echo -e "\n${Y}=== Module 19: Final System Verification Report ===${N}"
   if [ "$SELF_TEST" = "yes" ]; then
     log "skipped: no network/changes in self-test"
     return 0
@@ -2460,6 +2747,8 @@ sec_scanner
 sec_services
 sec_defenses
 sec_upgrade
+sec_extended_audit
+sec_browser_policies
 sec_health
 sec_verify
 

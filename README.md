@@ -6,19 +6,19 @@ Welcome to the **CyberPatriot Hardening Suite**. This repository contains OS-spe
 
 ---
 
-## 📜 Script Overview
+## Script Overview
 
 | Script Name | Target Operating Systems | Language / Shell | Key Features |
 | :--- | :--- | :--- | :--- |
-| **`UbuntuSuperScript`** | Ubuntu 20.04 / 22.04 / 24.04 LTS | Bash | 17 modules: Step 0 prompts, PAM faillock, `su` restriction, apt dependency guard, sysctl, GRUB boot hardening (`chmod 600 /boot/grub/grub.cfg`, `GRUB_CMDLINE_LINUX` sanitization, `update-grub`), UFW, AppArmor enforce (skipping kept service families), AST/tokenizer backdoor sweep (crontabs & user/system units), service family map, rootkit/antivirus scanners (`rkhunter`, `chkrootkit`, `clamscan`), `snap refresh`, required service hardening (Apache, vsftpd with `allow_writeable_chroot` & port 21 check, Samba, MySQL/MariaDB, PHP isolated syntax linting `php -n -c`, Nginx with drop-in config rollback), defenses pre-install & auditd rules, system upgrades with unattended-upgrades pre-install & reconfigure, post-run health check, final verification printout |
-| **`MintSuperScript`** | Linux Mint 20 / 21 | Bash | 17 modules: Step 0 prompts, Mint Update Manager dconf database, `su` restriction, apt dependency guard, sysctl, GRUB boot hardening (`chmod 600 /boot/grub/grub.cfg`, `GRUB_CMDLINE_LINUX` sanitization, `update-grub`), UFW, AppArmor enforce (skipping kept service families), AST/tokenizer backdoor sweep (crontabs & user/system units), rootkit/antivirus scanners (`rkhunter`, `chkrootkit`, `clamscan`), required service hardening (Apache, vsftpd with `allow_writeable_chroot` & port 21 check, Samba, MySQL/MariaDB, PHP isolated syntax linting `php -n -c`, Nginx with drop-in config rollback), defenses pre-install & auditd rules, system upgrades with unattended-upgrades pre-install & reconfigure, post-run health check, final verification printout |
-| **`DebianSuperScript`** | Debian 11 (Bullseye) / 12 (Bookworm) | Bash | 17 modules: Step 0 prompts, `su` restriction, apt dependency guard (Debian meta-packages protected), sysctl, GRUB boot hardening, UFW, AppArmor enforce (skipping kept service families), AST/tokenizer backdoor sweep (crontabs & user/system units), rootkit/antivirus scanners (`rkhunter`, `chkrootkit`, `clamscan`), required service hardening (Apache, vsftpd with `allow_writeable_chroot` & port 21 check, Samba, MySQL/MariaDB, PHP isolated syntax linting `php -n -c`, Nginx with drop-in config rollback), defenses pre-install & auditd rules, system upgrades with unattended-upgrades pre-install & reconfigure, post-run health check, final verification printout. No `snap refresh` (Debian does not use snap by default). Apt sources filtered against official Debian mirrors (`deb.debian.org`, `security.debian.org`). |
-| **`WindowsSuperScript`** | Windows 10 / 11 Workstations | PowerShell 5.1+ | Forensics snapshot (`CP-Evidence.txt`), SID-based User Rights Assignment via `secedit`, 40+ security registry options, UAC max, Defender & Inbound Firewall rule pruning, Adapter Bindings hardening (`-SmbRequired` / Step 0 prompt, never touches `ms_tcpip`), OneDrive management (startup/sync disabled, no uninstall), 7-Zip/LibreOffice upgrades |
-| **`WindowsServerSuperScript`** | Windows Server 2016 / 2019 / 2022 | PowerShell 5.1+ | Domain Controller policy, Domain Admins enforcement, LDAP signing/channel binding, DNS/IIS hardening, Windows Update policy, Server Features, Inbound Firewall rule pruning with role/port safeguards, Adapter Bindings hardening (`-SmbRequired` / Step 0 prompt, never touches `ms_tcpip`), Security Registry parity (`AlwaysInstallElevated`, `AllowTelemetry`, Screen Saver, WinRM, Netlogon) |
+| **`UbuntuSuperScript`** | Ubuntu 20.04 / 22.04 / 24.04 LTS | Bash | Read-only `--audit-only` report; 19 modules including PAM/faillock, account and service controls, sysctl/GRUB, UFW, AppArmor, persistence scans, required-service hardening, optional desktop screen-lock/media autorun policy, managed Chromium/Chrome/Firefox policies, extended report-only persistence/package-integrity audit, browser and package updates, post-run health and final verification |
+| **`MintSuperScript`** | Linux Mint 20 / 21 | Bash | Read-only `--audit-only` report; 19 modules matching Debian/Ubuntu security modules, plus Cinnamon screen-lock/media autorun policy and Mint Update Manager automatic-update settings; managed Chromium/Chrome/Firefox policies, extended report-only persistence/package-integrity audit, browser and package updates, post-run health and final verification |
+| **`DebianSuperScript`** | Debian 11 (Bullseye) / 12 (Bookworm) | Bash | Read-only `--audit-only` report; 19 modules matching Ubuntu/Mint security modules, with Debian package/source safeguards; desktop policies apply only when Cinnamon or GNOME schemas are installed; managed Chromium/Chrome/Firefox policies, extended report-only persistence/package-integrity audit, browser and package updates, post-run health and final verification. No Snap refresh (Debian does not use Snap by default). |
+| **`WindowsSuperScript`** | Windows 10 / 11 Workstations | PowerShell 5.1+ | Read-only `-AuditOnly` report; forensics snapshot with unique backup before replacement; SID-based User Rights Assignment via `secedit`, 40+ security registry options, UAC max, Defender & Inbound Firewall rule pruning, Adapter Bindings hardening (`-SmbRequired` / Step 0 prompt, never touches `ms_tcpip`), scenario share preservation via `-KeepShares`, OneDrive management (startup/sync disabled, no uninstall), Firefox policy preferences, 7-Zip/LibreOffice upgrades |
+| **`WindowsServerSuperScript`** | Windows Server 2016 / 2019 / 2022 | PowerShell 5.1+ | Read-only `-AuditOnly` report; forensics snapshot with unique backup before replacement; Domain Controller policy, Domain Admins enforcement, LDAP signing/channel binding, DNS/IIS hardening, Windows Update policy, Server Features, Inbound Firewall rule pruning with role/port safeguards, Adapter Bindings hardening (`-SmbRequired` / Step 0 prompt, never touches `ms_tcpip`), scenario share preservation via `-KeepShares`, Firefox policy preferences, Security Registry parity (`AlwaysInstallElevated`, `AllowTelemetry`, Screen Saver, WinRM, Netlogon) |
 
 ---
 
-## ⚡ Quick Start & Execution
+## Quick Start & Execution
 
 ### 1. Ubuntu SuperScript
 ```bash
@@ -81,7 +81,7 @@ Copy-Item .\WindowsSuperScript .\WindowsSuperScript.ps1
 ```
 *Non-Interactive Mode:*
 ```powershell
-& ([scriptblock]::Create((Get-Content .\WindowsSuperScript -Raw))) -Force -SmbRequired -Users "alice,bob" -Admins "alice" -Keep "Spooler,sshd" -Ports "22,80" -Password "Cyb3r-Pat!2026-xQz"
+& ([scriptblock]::Create((Get-Content .\WindowsSuperScript -Raw))) -Force -SmbRequired -Users "alice,bob" -Admins "alice" -Keep "Spooler,sshd" -KeepShares "Public" -Ports "22,80" -Password (Read-Host -AsSecureString "Enter a unique password")
 ```
 *Self-Test Dry Run (safe, non-interactive, dry-run only, makes no changes):*
 ```powershell
@@ -101,16 +101,59 @@ Copy-Item .\WindowsServerSuperScript .\WindowsServerSuperScript.ps1
 ```
 *Non-Interactive Mode:*
 ```powershell
-& ([scriptblock]::Create((Get-Content .\WindowsServerSuperScript -Raw))) -Force -SmbRequired -Users "alice,bob" -Admins "alice" -Keep "DNS,DHCP,W3SVC" -Ports "53,80" -Password "Cyb3r-Pat!2026-xQz"
+& ([scriptblock]::Create((Get-Content .\WindowsServerSuperScript -Raw))) -Force -SmbRequired -Users "alice,bob" -Admins "alice" -Keep "DNS,DHCP,W3SVC" -KeepShares "Public" -Ports "53,80" -Password (Read-Host -AsSecureString "Enter a unique password")
 ```
 *Self-Test Dry Run (safe, non-interactive, dry-run only, makes no changes):*
 ```powershell
 & ([scriptblock]::Create((Get-Content .\WindowsServerSuperScript -Raw))) -SelfTest -SmbRequired
 ```
 
+## Read-only Audit Mode
+
+Use audit mode before hardening to capture the guide's baseline information without changing system settings or entering remediation modules. Linux writes a uniquely named report in `/tmp` with owner-only permissions; Windows writes a uniquely named `CP-Audit-*.txt` file to the Desktop (or `%TEMP%` if no Desktop is available). Reports include account and privilege inventories, services and listeners, share permissions, firewall/audit policy, installed software or packages, persistence leads, and platform-specific security status. Non-root Linux runs may not see protected details. Windows scripts still require an elevated PowerShell session. Reports may contain usernames, paths, services, and network details; keep them local. A normal Windows run preserves any existing `CP-Evidence.txt` to a unique backup before replacing it, and stops if that backup cannot be created.
+
+```bash
+./UbuntuSuperScript --audit-only
+./MintSuperScript --audit-only
+./DebianSuperScript --audit-only
+```
+
+```powershell
+& ([scriptblock]::Create((Get-Content .\WindowsSuperScript -Raw))) -AuditOnly
+& ([scriptblock]::Create((Get-Content .\WindowsServerSuperScript -Raw))) -AuditOnly
+```
+
+`--self-test` / `-SelfTest` remains the code-path dry run; audit mode inspects the actual host. Review audit output against the image README before running a remediation mode.
+
+## What the Scripts Automate and What Still Needs Manual Work
+
+The scripts automate general system controls, but they cannot infer image-specific answers or decide whether a service, share, account, file, or application is required. Read the image README and answer forensic questions before remediation. The scripts do not contain answer-key usernames, passwords, or forensic values.
+
+### Windows
+
+The Windows scripts apply the selected account, password, audit, user-rights, UAC, anonymous-access, Defender, firewall, SMB, service, and remote-access controls. Both configure Chrome/Edge managed security policies and Firefox profile preferences; restart browsers and verify their policies/settings afterward. The workstation script scans for prohibited software/files and attempts 7-Zip, LibreOffice, and detected Firefox upgrades through `winget` or Chocolatey. These package-manager attempts are not proof that the latest version installed.
+
+Windows Update is not fully installed or verified by the scripts: they configure automatic-update policy and request a scan, but do not confirm that updates downloaded, installed, or completed a required restart. Open **Settings > Windows Update** (or **Settings > Update & Security > Windows Update** on older releases), select **Check for updates**, install applicable updates, restart when prompted, then check again. On Server, coordinate patching and restarts with required roles and the image README. If `winget` or Chocolatey is unavailable, or a browser update attempt fails, update the software using approved installers or the competition's software center. Do not install third-party scanners or cleanup utilities unless the competition explicitly permits them.
+
+Before share cleanup, enter every required non-default share in the interactive prompt or pass it as `-KeepShares "share1,share2"`. Domain controllers retain `SYSVOL` and `NETLOGON` automatically. Only built-in administrative shares are retained by default on workstations and member servers; a scenario share omitted from `-KeepShares` can be removed. Required services still belong in `-Keep`.
+
+Windows interactive runs request a unique password as masked input. Account creation and password-reset actions are skipped when no password is supplied; this is expected in `-Force` mode unless a `SecureString` is provided, for example `-Password (Read-Host -AsSecureString "Enter a unique password")`. Do not pass a literal password in a command line or store one in the README. Newly created accounts must change their password at first logon.
+
+### Debian, Ubuntu, and Linux Mint
+
+All three Linux scripts now share the same 19-module hardening set: account and privilege review/remediation, password and PAM policy, sudoers, kernel settings, SSH, package/service removal, selected firewall rules, required-service hardening, desktop login protections, managed browser policies, broader persistence/package-integrity review, and package upgrades. Browser extensions and integrity findings are report-only; the scripts do not remove extensions or guess at scenario-specific accounts/files. Installed Firefox and Chromium are updated through their detected APT, Snap, or Flatpak packages where supported. Mint additionally configures Linux Mint Update Manager settings. These actions depend on working repositories, the image's package format, and the scenario's required services; review the log and final health check. The [manual update and UFW guide](#manual-debianubuntumint-updates-and-ufw) explains how to recover from failed repository/package operations and verify updates.
+
+### Manual tasks on every platform
+
+1. **Forensics questions and application-specific answers:** inspect the named evidence and application, record the requested answer in the required file and format, and submit it yourself. A localhost database or driver-license value cannot be safely guessed or derived by a generic hardening script. Preserve evidence before removing accounts, files, keys, or software.
+2. **Scenario decisions:** compare users, administrators, services, shares, ports, packages, and prohibited files with the image README. Review audit reports and suspicious scanner findings; a search match is a lead, not proof. Do not remove all SUID files, keys, media, or scheduled jobs indiscriminately.
+3. **Functional verification:** log in with the intended accounts; test required websites, shares, remote access, services, DNS, and application workflows. Confirm firewall rules permit required traffic and that policy changes have not broken the image.
+4. **Updates and restarts:** verify that updates actually installed and restart only when appropriate. For Windows, use Windows Update as described above. For Debian-family systems, use the manual update guide if the script reports failed repositories, held packages, or pending updates.
+5. **Other platforms and GUI-only settings:** these scripts do not configure FreeBSD. Use the official FreeBSD Handbook and image-specific instructions for FreeBSD practice. After browser policy changes, restart browsers and verify Chrome/Edge policies in `chrome://policy` / `edge://policy`, Firefox settings in `about:policies`, and the Linux desktop lock/autorun settings in the active session. If a setting is unavailable through a supported policy or user profile, configure it in that application's UI and verify it manually.
+
 ---
 
-## 🐧 Linux Module Guide
+## Linux Module Guide
 
 The following guide applies to `DebianSuperScript`, `UbuntuSuperScript`, and `MintSuperScript`. Module numbers are the same in all three scripts. Step 0 gathers scenario-specific information before the modules run.
 
@@ -130,11 +173,13 @@ The following guide applies to `DebianSuperScript`, `UbuntuSuperScript`, and `Mi
 | **12. Rootkit & Malware Scanners** | Optionally installs/runs `rkhunter`, `chkrootkit`, and ClamAV scans with timeouts. Results are logged for review; scanner findings are report-only and are not automatically treated as proof of infection. |
 | **13. Required Service Hardening** | Applies configuration hardening only to services identified as required (Apache, Nginx, FTP, Samba, MySQL/MariaDB, or PHP). It uses service-specific configuration checks and restores backups when validation fails. |
 | **14. Defenses, Logging & Access Controls** | Enables or configures AppArmor, auditd rules, fail2ban, and rsyslog where available; disables desktop guest/automatic login; blocks selected removable-storage/expansion modules; masks Ctrl-Alt-Del reboot; disables core dumps; and preserves VM guest integration services. |
-| **15. Package Upgrades & Security Updates** | Uses a successful APT metadata refresh—not an ICMP ping—to detect repository access, then installs all available package upgrades (including published security updates), performs a distribution upgrade, protects important packages during guarded autoremove, configures unattended upgrades, and targets installed Chromium and OpenSSH packages for updates. Ubuntu/Mint refresh Chromium via Snap when installed; all three scripts also update the Chromium Flatpak when present. Update success depends on working repositories and is reported in the log. |
-| **16. Post-Run System Health Check** | Checks required services and ports, SSH and sudoers syntax, configured users/admins, and whether UFW is active; reports pass/fail/skip results. |
-| **17. Final System Verification Report** | Reports failed systemd units, listening ports, administrator/UID-0 accounts, IPv4 SYN-cookie/forwarding values, UFW status, effective SSH settings, remaining upgradable packages, and whether a reboot is pending. |
+| **15. Package Upgrades & Security Updates** | Uses a successful APT metadata refresh—not an ICMP ping—to detect repository access, then installs all available package upgrades (including published security updates), performs a distribution upgrade, protects important packages during guarded autoremove, configures unattended upgrades, and targets installed Firefox, Chromium, and OpenSSH packages for updates. Browser package sources are refreshed through APT, Snap, or Flatpak where installed. Mint also configures Update Manager automatic updates. Update success depends on working repositories and is reported in the log. |
+| **16. Extended Persistence & Integrity Audit (Report Only)** | Reviews shell and desktop startup, authorized SSH keys, inetd/xinetd, systemd timers, scheduled jobs, remote-access packages, APT hooks, PAM bypass indicators, local command shadowing, package-integrity differences, and suspicious Snap/Flatpak applications. Matches are leads for manual review and are never automatically deleted by this module. |
+| **17. Browser Policies & Extension Inventory** | Adds managed pop-up, notification, Safe Browsing, password-manager, autofill, sync, HTTPS-only, and related policies for installed Chromium/Chrome and Firefox browsers. Existing Firefox policies are preserved; Chromium extensions are inventoried only. Restart browsers and inspect their policy pages to verify settings. |
+| **18. Post-Run System Health Check** | Checks required services and ports, SSH and sudoers syntax, configured users/admins, and whether UFW is active; reports pass/fail/skip results. |
+| **19. Final System Verification Report** | Reports failed systemd units, listening ports, administrator/UID-0 accounts, IPv4 SYN-cookie/forwarding values, UFW status, effective SSH settings, remaining upgradable packages, and whether a reboot is pending. |
 
-## 🧰 Manual Debian/Ubuntu/Mint Updates and UFW
+## Manual Debian/Ubuntu/Mint Updates and UFW
 
 Use these steps if Module 11 or Module 15 cannot update packages or enable UFW in the VM. They are manual alternatives for the Debian-family images supported by the Linux scripts; they are not commands to run blindly on every CyberPatriot image. Complete the image's forensics questions first, read its desktop README, and confirm the OS and required services/ports before changing anything.
 
@@ -170,29 +215,39 @@ sudo apt full-upgrade
 
 `full-upgrade` may remove packages to resolve dependencies; do not approve removals that conflict with the image README or required services. If `apt update` failed, fix that first—an upgrade cannot retrieve current updates from broken or stale repository metadata.
 
-### 3. Update Chromium and OpenSSH if installed
+### 3. Update Firefox, Chromium, and OpenSSH if installed
 
 First check which Chromium delivery method and packages are present:
 
 ```bash
 dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\n' chromium chromium-browser 2>/dev/null
+dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\n' firefox 2>/dev/null
 ```
 
-Use the update command that matches the installed Chromium:
+Use the update command that matches the installed browser package:
 
 ```bash
 # Debian/Ubuntu/Mint APT package (run only for a package shown as installed)
 sudo apt install --only-upgrade chromium
 sudo apt install --only-upgrade chromium-browser
 
+# Firefox APT package (run only when installed from APT)
+sudo apt install --only-upgrade firefox
+
 # Chromium Snap (common on Ubuntu and some Mint images)
 sudo snap refresh chromium
 
+# Firefox Snap (only when `snap list firefox` shows it installed)
+sudo snap refresh firefox
+
 # Chromium Flatpak (only if this application is installed as a Flatpak)
 sudo flatpak update org.chromium.Chromium
+
+# Firefox Flatpak (only if this application is installed as a Flatpak)
+sudo flatpak update org.mozilla.firefox
 ```
 
-An error such as “package is not installed” or “snap not found” means that command does not match the image's installation method; do not install Chromium solely to clear the error. Check `snap list chromium` or `flatpak list --app` to identify the installed source. Keep Chromium if the image README names it as the required browser.
+An error such as “package is not installed” or “snap not found” means that command does not match the image's installation method; do not install a browser solely to clear the error. Check `snap list` or `flatpak list --app` to identify the installed source. Keep browsers named in the image README.
 
 Update the installed OpenSSH packages from APT:
 
@@ -235,7 +290,7 @@ An empty upgradable-package list means APT currently reports no upgrades from th
 
 ---
 
-## 🛡️ Feature & Capability Matrix
+## Feature & Capability Matrix
 
 | Feature / Hardening Control | `UbuntuSuperScript` | `MintSuperScript` | `DebianSuperScript` | `WindowsSuperScript` | `WindowsServerSuperScript` |
 | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -250,27 +305,30 @@ An empty upgradable-package list means APT currently reports no upgrades from th
 | **Sudoers ALL Rule & NOPASSWD Cleanup (Module 4)** | Yes (`visudo -cf` check) | Yes (`visudo -cf` check) | Yes (`visudo -cf` check) | N/A | N/A |
 | **User Rights Assignment (SIDs) (Sec 3)** | N/A | N/A | N/A | Full `secedit` (33+ SIDs) | Full `secedit` (33+ SIDs, DC-aware) |
 | **Security Registry Options (40+) (Sec 4)** | N/A | N/A | N/A | UAC Max, CAD, LSA, WDigest, AutoAdminLogon=0, AlwaysInstallElevated=0, AllowTelemetry=0 | UAC Max, CAD, LSA, LDAP Signing, Printer Driver Policy, Wecsvc, AlwaysInstallElevated=0, AllowTelemetry=0, Screen Saver, WinRM, Netlogon |
+| **Browser Security Policies** | Chromium/Chrome managed policies; Firefox enterprise policy where installed | Same as Ubuntu | Same as Ubuntu | Chrome/Edge policies; Firefox profile hardening | Chrome/Edge policies; Firefox profile hardening |
 | **System File Permissions & GRUB Hardening (Module 6)** | `chmod 600 /boot/grub/grub.cfg`, remove `init=`, `single`, `rw init` from `GRUB_CMDLINE_LINUX*`, `update-grub`, shadow/passwd/sudoers perms | `chmod 600 /boot/grub/grub.cfg`, remove `init=`, `single`, `rw init` from `GRUB_CMDLINE_LINUX*`, `update-grub`, shadow/passwd/sudoers perms | Same as Ubuntu | N/A | N/A |
 | **Sysctl Kernel Hardening (Module 5)** | IPv4 TCP SYN cookies enabled, IPv4 forwarding disabled and persisted in sysctl drop-in and `/etc/sysctl.conf`; runtime values verified | Same as Ubuntu | Same as Ubuntu | N/A | N/A |
 | **Firewall Configuration (Module 11 / Sec 5)** | APT refreshed, UFW installed, default deny, enabled & status verified; rules pruned | Same as Ubuntu | Same as Ubuntu | Defender Firewall (App Rules Pruned) | Defender Firewall (App Rules Pruned, Role/Port Safeguards) |
 | **Adapter Bindings Hardening (Sec 6)** | N/A | N/A | N/A | Disables bindings; preserves `ms_server`/`ms_msclient` only if `-SmbRequired`; never touches `ms_tcpip` | Disables bindings; preserves `ms_server`/`ms_msclient` only if `-SmbRequired`; never touches `ms_tcpip` |
 | **Backdoor & Persistence Sweep (Module 9 / Sec 7)** | Netcat `dpkg -S`, Tokenizer/AST Cron & Systemd Sweep (/root & /home user units) | Netcat `dpkg -S`, Tokenizer/AST Cron & Systemd Sweep (/root & /home user units) | Same as Ubuntu | IFEO, WMI, Tasks, Run Keys, Startup Folders | IFEO, WMI, Tasks, Run Keys, Startup Folders |
 | **Prohibited Software Removal (Module 8 / Sec 8)** | Purges prohibited & unrequired services | Purges prohibited & unrequired services | Purges prohibited & unrequired services | CCleaner, WebCompanion, OpenTFTP, BitTorrent, Wireshark | CCleaner, WebCompanion, OpenTFTP, BitTorrent, Wireshark |
-| **Software Version Upgrades (Module 15 / Sec 9)** | `apt-get upgrade`, `dist-upgrade`, guarded `autoremove` | `apt-get upgrade`, `dist-upgrade`, guarded `autoremove` | `apt-get upgrade`, `dist-upgrade`, guarded `autoremove` | 7-Zip, LibreOffice (`winget`/`choco`, deduplicated) | 7-Zip, LibreOffice (`winget`/`choco`, deduplicated) |
+| **Software Version Upgrades (Module 15 / Sec 9)** | Firefox/Chromium where installed; `apt-get upgrade`, `dist-upgrade`, guarded `autoremove` | Firefox/Chromium where installed; `apt-get upgrade`, `dist-upgrade`, guarded `autoremove` | Firefox/Chromium where installed; `apt-get upgrade`, `dist-upgrade`, guarded `autoremove` | 7-Zip, LibreOffice, Firefox attempts via `winget`/Chocolatey | 7-Zip, LibreOffice and package-manager-wide upgrades |
 | **Rootkit & Malware Scanning (Module 12)** | Module 12: `rkhunter`, `chkrootkit`, `clamscan` (600s timeouts, report-only), `snap refresh` | Module 12: `rkhunter`, `chkrootkit`, `clamscan` (600s timeouts, report-only) | Module 12: `rkhunter`, `chkrootkit`, `clamscan` (600s timeouts, report-only, no snap) | N/A | N/A |
 | **Required Service Hardening (Module 13)** | Module 13: Apache (`TraceEnable Off`), vsftpd (`anonymous_enable=NO`, `chroot_local_user=YES`, `allow_writeable_chroot=YES`, active/port 21 test), Samba, MySQL/MariaDB (`bind-address 127.0.0.1`), PHP (`php -n -c` linting), Nginx (`server_tokens` drop-in rollback) | Module 13: Apache (`TraceEnable Off`), vsftpd (`anonymous_enable=NO`, `chroot_local_user=YES`, `allow_writeable_chroot=YES`, active/port 21 test), Samba, MySQL/MariaDB (`bind-address 127.0.0.1`), PHP (`php -n -c` linting), Nginx (`server_tokens` drop-in rollback) | Same as Ubuntu | N/A | DNS, IIS, Wecsvc hardening |
-| **Defenses, Logging & Access Controls (Module 14)** | Module 14: Pre-install defense pkgs, AppArmor (`aa-enforce` skipping kept family profiles), auditd rules, fail2ban, rsyslog, LightDM/GDM guest/autologin off, `usb-storage`/firewire/thunderbolt blacklist, coredump off | Module 14: Pre-install defense pkgs, AppArmor (`aa-enforce` skipping kept family profiles), auditd rules, fail2ban, rsyslog, LightDM/GDM guest/autologin off, `usb-storage`/firewire/thunderbolt blacklist, coredump off | Same as Ubuntu | Exploit Guard, Defender Realtime/Cloud/MAPS, LSA Protection | Exploit Guard, Defender Realtime/Cloud/MAPS, LSA Protection, LDAP Signing/Enforcement |
-| **Package Upgrades & Policies (Module 15)** | Security/repository upgrades; installed Chromium (APT, snap, or Flatpak) and OpenSSH targeted updates; `dist-upgrade`, guarded `autoremove`, unattended-upgrades | Same as Ubuntu plus Mint Update Manager auto-refresh/auto-apply | Security/repository upgrades; installed Chromium (APT or Flatpak) and OpenSSH targeted updates; `dist-upgrade`, guarded `autoremove`, unattended-upgrades |
-| **Post-Run System Health Check (Module 16 / Sec 10)** | Module 16: Required services active, required ports listening, `sshd -t`, `visudo -c`, users exist, admin sudo/su sanity, UFW active | Module 16: Required services active, required ports listening, `sshd -t`, `visudo -c`, users exist, admin sudo/su sanity, UFW active | Same as Ubuntu | Section 10: Automatic Health Check (Firewall, Defender, RDP, Admins) | Section 10: Automatic Health Check (Firewall, Defender, RDP, Domain Admins) |
-| **Final System Verification Report (Module 17 / Sec 11)** | Failed units, listening ports, sudo/UID 0 accounts, IPv4 sysctls, active UFW, effective `sshd -T`, upgradable packages, pending reboot | Same as Ubuntu | Same as Ubuntu | Section 11: Final Verification Report (Shares, Firewall profiles) | Section 11: Final Verification Report (Shares, Firewall profiles) |
+| **Defenses, Logging & Access Controls (Module 14)** | Module 14: Pre-install defense pkgs, AppArmor (`aa-enforce` skipping kept family profiles), auditd rules, fail2ban, rsyslog, LightDM/GDM guest/autologin off, conditional Cinnamon/GNOME 5-minute lock and media autorun policy, `usb-storage`/firewire/thunderbolt blacklist, coredumps off | Same as Ubuntu plus Mint Cinnamon settings | Same as Ubuntu with available desktop schema detection | Exploit Guard, Defender Realtime/Cloud/MAPS, LSA Protection | Exploit Guard, Defender Realtime/Cloud/MAPS, LSA Protection, LDAP Signing/Enforcement |
+| **Package Upgrades & Policies (Module 15)** | Security/repository upgrades; installed Firefox, Chromium (APT, Snap, or Flatpak), and OpenSSH targeted updates; `dist-upgrade`, guarded `autoremove`, unattended-upgrades | Same as Ubuntu plus Mint Update Manager auto-refresh/auto-apply | Security/repository upgrades; installed Firefox, Chromium (APT or Flatpak), and OpenSSH targeted updates; `dist-upgrade`, guarded `autoremove`, unattended-upgrades |
+| **Extended Audit & Browser Policies (Modules 16-17)** | Report-only startup/integrity audit; managed Chromium/Chrome/Firefox policies and extension inventory | Same as Ubuntu | Same as Ubuntu | Chrome/Edge managed policies, Firefox profile preferences | Chrome/Edge managed policies, Firefox profile preferences |
+| **Post-Run System Health Check (Module 18 / Sec 10)** | Required services active, required ports listening, `sshd -t`, `visudo -c`, users/admins, UFW active | Same as Ubuntu | Same as Ubuntu | Section 10: Automatic Health Check (Firewall, Defender, RDP, Admins) | Section 10: Automatic Health Check (Firewall, Defender, RDP, Domain Admins) |
+| **Final System Verification Report (Module 19 / Sec 11)** | Failed units, listening ports, sudo/UID 0 accounts, IPv4 sysctls, active UFW, effective `sshd -T`, upgradable packages, pending reboot | Same as Ubuntu | Same as Ubuntu | Section 11: Final Verification Report (Shares, Firewall profiles) | Section 11: Final Verification Report (Shares, Firewall profiles) |
 | **VM Integration & Snapshot Safety** | Open-VM-Tools, VBoxGuest, Qemu-GA & Hyper-V daemons protected by dependency guard; snapshot integration active | Open-VM-Tools, VBoxGuest, Qemu-GA & Hyper-V daemons protected by dependency guard; snapshot integration active | Open-VM-Tools, VBoxGuest, Qemu-GA & Hyper-V daemons protected by dependency guard; snapshot integration active | Volume Shadow Copy (VSS) & swprv set to Manual/Healthy; VMTools & VBoxService protected; SeServiceLogonRight grants Local/Network Service | Volume Shadow Copy (VSS) & swprv set to Manual/Healthy; VMTools & VBoxService protected; SeServiceLogonRight grants Local/Network Service |
 
 ---
 
-## 🔍 Scored Competition Item Coverage Matrix (Automated / Report-Only / Manual)
+## Scored Competition Item Coverage Matrix (Automated / Report-Only / Manual)
 
 | Category / Scored Item | Windows (`WindowsSuperScript` & `Server`) | Linux (`UbuntuSuperScript`, `MintSuperScript` & `DebianSuperScript`) | Status |
 | :--- | :--- | :--- | :--- |
+| **Pre-hardening baseline inventory** | Unique audit report with users/groups, share permissions, listeners, services, tasks, audit/firewall policy, Defender, updates, optional features, and RDP settings | Unique owner-only report with accounts, privilege rules, services, sockets, firewall, packages, SSH, persistence, permissions, and audit status | **Report-only** |
 | **Forensics Questions** | Discovers Forensics Q files on Desktop | Discovers Forensics Q files on Desktop | **Manual** |
 | **Unauthorized Users / Admins** | Audit & remove non-authorized users/admins | Audit & remove non-authorized users/admins (Module 1) | **Automated** |
 | **User Passwords & Complexity** | Enforces complexity, min age, lockout, no null | Enforces complexity, aging, `pam_pwhistory`, `no nullok` (Modules 2, 3) | **Automated** |
@@ -283,14 +341,14 @@ An empty upgradable-package list means APT currently reports no upgrades from th
 | **System Defenses & Access** | Exploit Guard, Defender, LSA Protection | Pre-install defense packages, AppArmor enforce (skips kept family profiles), fail2ban, rsyslog, guest/autologin off, kernel blacklists, coredumps off (Module 14) | **Automated** |
 | **Prohibited Software Removal** | CCleaner, WebCompanion, OpenTFTP, BitTorrent, Wireshark | Prohibited tools & unneeded service packages purged (Module 8) | **Automated** |
 | **Prohibited File Search** | Non-system MP3s, installers, archives deleted | Non-system MP3s, installers, archives deleted (Module 10) | **Automated** |
-| **Software Upgrades** | 7-Zip, LibreOffice, Firefox updated via winget/choco (deduplicated, native exit codes) | `apt-get upgrade`, `dist-upgrade`, guarded `autoremove`, pre-install & reconfigure `unattended-upgrades`, `snap refresh` (Module 15) | **Automated** |
+| **Software Upgrades** | 7-Zip, LibreOffice, and detected Firefox attempted via `winget`/Chocolatey; Windows Update installation/restart verification remains manual | APT package upgrades plus installed Firefox/Chromium updates by package source; verify repository results | **Partially automated; Windows Update installation and restart are manual** |
 | **Malware & Backdoor Sweeps** | IFEO, WMI, Tasks, Run keys swept | Netcat purged, AST/tokenizer cron & user/system units sweep, `rkhunter`/`chkrootkit`/`clamscan` (Modules 9, 12) | **Automated / Report-Only** |
-| **Health Check & Verification** | Health check (Section 10) and Verification (Section 11) | Service health check (Module 16) and system verification report (Module 17) | **Automated** |
+| **Health Check & Verification** | Health check (Section 10) and Verification (Section 11) | Service health check (Module 18) and system verification report (Module 19) | **Automated** |
 | **Localhost Driver License & Perl Backdoor Hunt** | N/A | Manual investigation required | **Manual** |
 
 ---
 
-## 🧪 Quality Assurance & Test Verification
+## Quality Assurance & Test Verification
 
 All scripts in this repository undergo automated verification checks prior to release:
 

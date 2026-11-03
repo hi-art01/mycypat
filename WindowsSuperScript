@@ -5,19 +5,21 @@
 
 .DESCRIPTION
   Interactively prompts for README specifics (Authorized Users, Authorized Admins,
-  Required Services, Allowed Ports, Default Password) and executes aggressive Y/N hardening
+  Required Services, Allowed Ports, optional unique account password) and executes Y/N hardening
   modules for Windows 10/11 Workstations.
 #>
 
 param(
     [switch]$Force,
     [switch]$SelfTest,
+    [switch]$AuditOnly,
     [switch]$SmbRequired,
     [string]$Users,
     [string]$Admins,
     [string]$Keep,
+    [string]$KeepShares,
     [string]$Ports,
-    [string]$Password
+    [securestring]$Password
 )
 
 function Remove-ProhibitedSoftware {
@@ -63,10 +65,18 @@ $ErrorActionPreference = 'Continue'
 $LogFile = "C:\Windows\Temp\CP-Windows-Hardening-Log.txt"
 $SummaryFile = "C:\CP-Notes\summary.txt"
 $Desktop = [Environment]::GetFolderPath('Desktop')
-if (-not $Desktop -or -not (Test-Path $Desktop -ErrorAction SilentlyContinue)) { $Desktop = if ($env:USERPROFILE -and (Test-Path "$env:USERPROFILE\Desktop" -ErrorAction SilentlyContinue)) { "$env:USERPROFILE\Desktop" } else { "C:\CP-Notes" } }
-$EvFile  = Join-Path $Desktop 'CP-Evidence.txt'
+if (-not $Desktop -or -not (Test-Path $Desktop -ErrorAction SilentlyContinue)) {
+    if ($env:USERPROFILE -and (Test-Path "$env:USERPROFILE\Desktop" -ErrorAction SilentlyContinue)) { $Desktop = "$env:USERPROFILE\Desktop" }
+    elseif ($AuditOnly -and $env:TEMP) { $Desktop = $env:TEMP }
+    else { $Desktop = "C:\CP-Notes" }
+}
+$EvFile = if ($AuditOnly) {
+    Join-Path $Desktop ("CP-Audit-{0}-{1}.txt" -f (Get-Date -Format 'yyyyMMdd-HHmmss'), [guid]::NewGuid().ToString('N'))
+} else {
+    Join-Path $Desktop 'CP-Evidence.txt'
+}
 
-if (-not (Test-Path "C:\CP-Notes")) { New-Item -Path "C:\CP-Notes" -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null }
+if (-not $AuditOnly -and -not (Test-Path "C:\CP-Notes")) { New-Item -Path "C:\CP-Notes" -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null }
 
 function Section([string]$t) { Write-Host "`n=== $t ===" -ForegroundColor Cyan }
 function Info([string]$t)    { Write-Host "[+] $t" -ForegroundColor Green; try { "$((Get-Date).ToString('T')) [INFO] $t" | Out-File $LogFile -Append -ErrorAction SilentlyContinue; "$((Get-Date).ToString('T')) [SCORE-LOG] $t" | Out-File $SummaryFile -Append -ErrorAction SilentlyContinue } catch {} }
@@ -133,7 +143,7 @@ Write-Host "====================================================" -ForegroundCol
 # ---------------------------------------------------------------------
 # FORENSICS GATE
 # ---------------------------------------------------------------------
-if (-not $Force -and -not $SelfTest) {
+if (-not $Force -and -not $SelfTest -and -not $AuditOnly) {
     Write-Host "`n*** FORENSICS GATE ***" -ForegroundColor Red
     Write-Host "Before running remediation scripts, confirm you have completed all Forensics Questions!" -ForegroundColor Yellow
     while ($true) {
@@ -153,17 +163,57 @@ function Add-Ev($title, $data) {
     if ($null -ne $data) { ($data | Out-String -Width 250) | Out-File $EvFile -Append -Encoding utf8 }
 }
 
+if (Test-Path -LiteralPath $EvFile) {
+    $EvidenceBackup = "$EvFile.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$([guid]::NewGuid().ToString('N'))"
+    try {
+        Copy-Item -LiteralPath $EvFile -Destination $EvidenceBackup -ErrorAction Stop
+        Info "Preserved existing evidence snapshot at: $EvidenceBackup"
+    } catch {
+        Write-Error "Could not preserve existing evidence snapshot; refusing to overwrite it: $($_.Exception.Message)"
+        exit 1
+    }
+}
+
 try {
+    $EvidenceCollectionFailed = $false
     "CP Evidence Collected $(Get-Date) on $env:COMPUTERNAME by $env:USERNAME" | Out-File $EvFile -Force -Encoding utf8
     Add-Ev 'OS' (Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber,InstallDate | Format-List)
     Add-Ev 'Local users' (Get-LocalUser | Select-Object Name,Enabled,SID,LastLogon,PasswordLastSet,PasswordRequired,PasswordExpires,Description | Format-Table -AutoSize)
     Add-Ev 'Local groups' (Get-LocalGroup | ForEach-Object { $g=$_.Name; Get-LocalGroupMember $g -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{Group=$g;Member=$_.Name;Type=$_.ObjectClass} } } | Format-Table -AutoSize)
-    Add-Ev 'Shares' (Get-SmbShare | Select-Object Name,Path,Description | Format-Table -AutoSize)
+    Add-Ev 'Shares' (Get-SmbShare | Select-Object Name,Path,Description,Special,CurrentUsers | Format-Table -AutoSize)
+    Add-Ev 'Share permissions' (Get-SmbShare -ErrorAction SilentlyContinue | ForEach-Object { Get-SmbShareAccess -Name $_.Name -ErrorAction SilentlyContinue } | Select-Object Name,AccountName,AccessControlType,AccessRight | Format-Table -AutoSize)
     Add-Ev 'Listening ports' (Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Sort-Object LocalPort | ForEach-Object { [pscustomobject]@{Port=$_.LocalPort;Addr=$_.LocalAddress;PID=$_.OwningProcess;Proc=(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).Name} } | Format-Table -AutoSize)
+    Add-Ev 'Services' (Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Select-Object Name,DisplayName,State,StartMode,PathName | Sort-Object Name | Format-Table -AutoSize)
+    Add-Ev 'Startup commands' (Get-CimInstance Win32_StartupCommand -ErrorAction SilentlyContinue | Select-Object Name,Command,Location,User | Format-Table -AutoSize)
     Add-Ev 'Scheduled tasks' (Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskPath -notmatch '\\Microsoft\\' } | Select-Object TaskPath,TaskName,State | Format-Table -AutoSize)
     Add-Ev 'Installed software' (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName } | Select-Object DisplayName,DisplayVersion,Publisher | Format-Table -AutoSize)
-    Info "Complete evidence snapshot generated at: $EvFile"
-} catch { Warn "Evidence collection encountered an issue: $($_.Exception.Message)" }
+    Add-Ev 'Local account and password policy' (& net.exe accounts 2>&1)
+    Add-Ev 'Current user privileges and groups' (& whoami.exe /all 2>&1)
+    Add-Ev 'Audit policy' (& auditpol.exe /get /category:* 2>&1)
+    Add-Ev 'Firewall profiles' (Get-NetFirewallProfile -ErrorAction SilentlyContinue | Select-Object Name,Enabled,DefaultInboundAction,DefaultOutboundAction | Format-Table -AutoSize)
+    Add-Ev 'Enabled inbound firewall rules' (Get-NetFirewallRule -Enabled True -Direction Inbound -ErrorAction SilentlyContinue | Select-Object DisplayName,Action,Profile,PolicyStoreSourceType | Format-Table -AutoSize)
+    Add-Ev 'Microsoft Defender status' (Get-MpComputerStatus -ErrorAction SilentlyContinue | Select-Object AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled,BehaviorMonitorEnabled,IoavProtectionEnabled,NISEnabled | Format-List)
+    Add-Ev 'Installed updates' (Get-HotFix -ErrorAction SilentlyContinue | Sort-Object InstalledOn -Descending | Select-Object -First 50 HotFixID,Description,InstalledOn | Format-Table -AutoSize)
+    if (Get-Command Get-WindowsOptionalFeature -ErrorAction SilentlyContinue) {
+        Add-Ev 'Windows optional feature state' (Get-WindowsOptionalFeature -Online -ErrorAction SilentlyContinue | Where-Object { $_.FeatureName -match 'SMB1|Telnet|NFS|IIS|TFTP|SNMP' } | Select-Object FeatureName,State | Format-Table -AutoSize)
+    }
+    Add-Ev 'SMB server configuration' (Get-SmbServerConfiguration -ErrorAction SilentlyContinue | Select-Object EnableSMB1Protocol,EnableSMB2Protocol,EnableSecuritySignature,RequireSecuritySignature | Format-List)
+    Add-Ev 'RDP and Remote Assistance settings' (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server','HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance' -ErrorAction SilentlyContinue | Select-Object PSPath,fDenyTSConnections,fAllowToGetHelp | Format-List)
+    if (-not $AuditOnly) { Info "Complete evidence snapshot generated at: $EvFile" }
+} catch {
+    $EvidenceCollectionFailed = $true
+    if ($AuditOnly) { Write-Host "Evidence collection encountered an issue: $($_.Exception.Message)" -ForegroundColor Yellow }
+    else { Warn "Evidence collection encountered an issue: $($_.Exception.Message)" }
+}
+
+if ($AuditOnly) {
+    if ($EvidenceCollectionFailed -or -not (Test-Path -LiteralPath $EvFile) -or (Get-Item -LiteralPath $EvFile).Length -eq 0) {
+        Write-Error "Read-only audit did not produce a complete report."
+        exit 1
+    }
+    Write-Host "Read-only audit complete. No remediation modules were run. Report: $EvFile" -ForegroundColor Green
+    exit 0
+}
 
 # ---------------------------------------------------------------------
 # STEP 0: README DETAILS & PROMPTS
@@ -178,9 +228,17 @@ $AuthorizedAdmins = @($AuthAdminsInput -split ',' | ForEach-Object { $_.Trim() }
 
 $KeepServicesInput = if ($Keep) { $Keep } elseif (-not $Force -and -not $SelfTest) { Read-Host "Enter Required Services to KEEP (comma-separated, e.g. 'Spooler,WinRM,sshd')" } else { "" }
 $KeepServices = @($KeepServicesInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$KeepSharesInput = if ($KeepShares) { $KeepShares } elseif (-not $Force -and -not $SelfTest) { Read-Host "Enter required SMB share names to KEEP (comma-separated; blank if none beyond built-in shares)" } else { "" }
+$RequiredShares = @($KeepSharesInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
-$NewPasswordInput = if ($Password) { $Password } elseif (-not $Force -and -not $SelfTest) { Read-Host "Enter Default Password for Authorized Users [Default: Cyb3r-Pat!2026-xQz]" } else { 'Cyb3r-Pat!2026-xQz' }
-$NewPassword = if ([string]::IsNullOrWhiteSpace($NewPasswordInput)) { 'Cyb3r-Pat!2026-xQz' } else { $NewPasswordInput }
+$sec = if ($Password) {
+    $Password
+} elseif (-not $Force -and -not $SelfTest) {
+    Read-Host "Enter a unique password for account creation or password resets (leave blank to skip these actions)" -AsSecureString
+} else {
+    $null
+}
+if ($sec -and $sec.Length -eq 0) { $sec = $null }
 
 if (-not $Force -and -not $SelfTest) {
     $RDPRequired = Confirm-Prompt "Is Remote Desktop (RDP) explicitly required by the README?" $false
@@ -208,6 +266,7 @@ Write-Host "====================================================" -ForegroundCol
 Write-Host "Authorized Users     : $($AuthorizedUsers -join ', ')"
 Write-Host "Authorized Admins    : $($AuthorizedAdmins -join ', ')"
 Write-Host "Keep Services        : $($KeepServices -join ', ')"
+Write-Host "Keep SMB Shares      : $($RequiredShares -join ', ')"
 Write-Host "RDP Required         : $RDPRequired | IIS Required: $IISRequired | FTP Required: $FTPRequired | SMB Sharing: $SMBSharingRequired"
 Write-Host "Run Mode             : FAST_MODE=$script:FAST_MODE | ALL_MODULES=$script:ALL_MODULES"
 Write-Host "====================================================" -ForegroundColor Green
@@ -234,8 +293,6 @@ if ($SelfTest) {
 
 $builtin = @('Administrator','Guest','DefaultAccount','WDAGUtilityAccount')
 $current = $env:USERNAME
-$sec = ConvertTo-SecureString $NewPassword -AsPlainText -Force
-
 # Dynamically resolve WdiServiceHost SID
 $wdiSID = "*S-1-5-80-3139157870-2983391045-3678747466-658725712-1809340420"
 try {
@@ -249,12 +306,17 @@ try {
 Section "1. Local Users & Groups Hardening"
 
 if (Confirm-Prompt "Audit and remove unauthorized local users?") {
-    foreach ($nu in $UsersToCreate) {
-        if (-not (Get-LocalUser -Name $nu -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $nu -Password $sec -PasswordNeverExpires $false -ErrorAction SilentlyContinue | Out-Null
-            Add-LocalGroupMember -Group 'Users' -Member $nu -ErrorAction SilentlyContinue | Out-Null
-            Info "Created requested local user $nu"
+    if ($sec) {
+        foreach ($nu in $UsersToCreate) {
+            if (-not (Get-LocalUser -Name $nu -ErrorAction SilentlyContinue)) {
+                New-LocalUser -Name $nu -Password $sec -PasswordNeverExpires $false -ErrorAction SilentlyContinue | Out-Null
+                net user $nu /logonpasswordchg:yes | Out-Null
+                Add-LocalGroupMember -Group 'Users' -Member $nu -ErrorAction SilentlyContinue | Out-Null
+                Info "Created requested local user $nu; require password change at next logon"
+            }
         }
+    } elseif ($UsersToCreate.Count -gt 0) {
+        Warn "Skipped requested account creation because no password was provided. Supply -Password or rerun interactively with a unique password."
     }
 
     foreach ($u in Get-LocalUser) {
@@ -296,14 +358,18 @@ if (Confirm-Prompt "Enforce Administrators group membership?") {
 }
 
 if (Confirm-Prompt "Reset password for all authorized local accounts?") {
-    foreach ($u in Get-LocalUser | Where-Object { $_.Enabled }) {
-        if ($u.Name -in $AuthorizedUsers -or $u.Name -in $AuthorizedAdmins) {
-            Set-LocalUser -Name $u.Name -Password $sec -PasswordNeverExpires $false -ErrorAction SilentlyContinue
-            net user $u.Name /passwordreq:yes | Out-Null
-            Info "Updated password, PasswordRequired=true, and PasswordNeverExpires=false for $($u.Name)"
+    if (-not $sec) {
+        Warn "Skipped password resets because no password was provided. Supply -Password or rerun interactively with a unique password."
+    } else {
+        foreach ($u in Get-LocalUser | Where-Object { $_.Enabled }) {
+            if ($u.Name -in $AuthorizedUsers -or $u.Name -in $AuthorizedAdmins) {
+                Set-LocalUser -Name $u.Name -Password $sec -PasswordNeverExpires $false -ErrorAction SilentlyContinue
+                net user $u.Name /passwordreq:yes | Out-Null
+                Info "Updated password, PasswordRequired=true, and PasswordNeverExpires=false for $($u.Name)"
+            }
         }
+        Write-Host "[!] Password reset applied to authorized accounts including current account." -ForegroundColor Yellow
     }
-    Write-Host "[!] Password reset applied to authorized accounts including current account. Default password set." -ForegroundColor Yellow
 }
 
 foreach ($b in @('Guest','Administrator','DefaultAccount')) {
@@ -749,7 +815,7 @@ if (Confirm-Prompt "Disable SMBv1 and prune non-standard SMB shares?") {
 
     $okShares = @('ADMIN$','C$','IPC$')
     foreach ($sh in Get-SmbShare -ErrorAction SilentlyContinue) {
-        if ($sh.Name -notin $okShares) {
+        if ($sh.Name -notin $okShares -and $sh.Name -notin $RequiredShares) {
             if ($script:FAST_MODE -or (Confirm-Prompt "Remove SMB Share '$($sh.Name)'?")) {
                 Remove-SmbShare -Name $sh.Name -Force -ErrorAction SilentlyContinue
                 Info "Removed share $($sh.Name)"
@@ -814,16 +880,30 @@ if (Confirm-Prompt "Configure automatic Windows Updates, Browser Policies, and r
     # Edge / Chrome Registry Policies
     Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' 'SmartScreenEnabled' 1
     Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' 'DefaultPopupsSetting' 2
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' 'PasswordManagerEnabled' 0
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' 'AutofillAddressEnabled' 0
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' 'SyncDisabled' 1
     Set-RegProperty 'HKLM:\SOFTWARE\Policies\Google\Chrome' 'SafeBrowsingProtectionLevel' 1
     Set-RegProperty 'HKLM:\SOFTWARE\Policies\Google\Chrome' 'DefaultPopupsSetting' 2
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Google\Chrome' 'PasswordManagerEnabled' 0
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Google\Chrome' 'AutofillAddressEnabled' 0
+    Set-RegProperty 'HKLM:\SOFTWARE\Policies\Google\Chrome' 'SyncDisabled' 1
 
     # Firefox user.js Hardening
     $ffPrefs = @'
 user_pref("privacy.donottrackheader.enabled", true);
 user_pref("browser.safebrowsing.malware.enabled", true);
 user_pref("browser.safebrowsing.phishing.enabled", true);
+user_pref("browser.safebrowsing.downloads.enabled", true);
+user_pref("browser.safebrowsing.downloads.remote.enabled", true);
+user_pref("browser.safebrowsing.downloads.remote.block_potentially_unwanted", true);
+user_pref("browser.safebrowsing.downloads.remote.block_uncommon", true);
 user_pref("dom.security.https_only_mode", true);
 user_pref("browser.contentblocking.category", "strict");
+user_pref("dom.disable_open_during_load", true);
+user_pref("signon.rememberSignons", false);
+user_pref("extensions.formautofill.addresses.enabled", false);
+user_pref("identity.fxaccounts.enabled", false);
 '@
     Get-ChildItem "$env:SystemDrive\Users\*\AppData\Roaming\Mozilla\Firefox\Profiles\*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
         Set-Content -Path (Join-Path $_.FullName 'user.js') -Value $ffPrefs -Force -ErrorAction SilentlyContinue
@@ -835,6 +915,7 @@ user_pref("browser.contentblocking.category", "strict");
     $installedApps = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName }
     $sevenZip = $installedApps | Where-Object { $_.DisplayName -match '7-Zip' }
     $libreOffice = $installedApps | Where-Object { $_.DisplayName -match 'LibreOffice' }
+    $firefox = $installedApps | Where-Object { $_.DisplayName -match 'Mozilla Firefox' }
 
     if ($sevenZip) { Info "Found 7-Zip Version: $($sevenZip.DisplayVersion)" }
     if ($libreOffice) { Info "Found LibreOffice Version: $($libreOffice.DisplayVersion)" }
@@ -848,6 +929,10 @@ user_pref("browser.contentblocking.category", "strict");
             winget upgrade --id TheDocumentFoundation.LibreOffice --exact --accept-source-agreements --accept-package-agreements
             if ($LASTEXITCODE -eq 0) { Info "Upgraded LibreOffice via winget" }
         }
+        if ($firefox) {
+            winget upgrade --id Mozilla.Firefox --exact --accept-source-agreements --accept-package-agreements
+            if ($LASTEXITCODE -eq 0) { Info "Updated Firefox via winget" } else { Warn "Firefox winget update did not complete; verify Firefox manually." }
+        }
     } elseif (Get-Command choco -ErrorAction SilentlyContinue) {
         if ($sevenZip) {
             choco upgrade 7zip -y
@@ -857,8 +942,12 @@ user_pref("browser.contentblocking.category", "strict");
             choco upgrade libreoffice-fresh -y
             if ($LASTEXITCODE -eq 0) { Info "Upgraded LibreOffice via Chocolatey" }
         }
+        if ($firefox) {
+            choco upgrade firefox -y
+            if ($LASTEXITCODE -eq 0) { Info "Updated Firefox via Chocolatey" } else { Warn "Firefox Chocolatey update did not complete; verify Firefox manually." }
+        }
     } else {
-        if ($sevenZip -or $libreOffice) { Warn "winget/choco not available. Please inspect and upgrade 7-Zip / LibreOffice manually if outdated." }
+        if ($sevenZip -or $libreOffice -or $firefox) { Warn "winget/choco not available. Please inspect and update 7-Zip, LibreOffice, and Firefox manually if needed." }
     }
     if (Get-Command winget -ErrorAction SilentlyContinue) {
         winget upgrade --all --silent --accept-source-agreements --accept-package-agreements --include-unknown *> $null
